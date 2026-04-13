@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: to-assistant-chatbot
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: MAGENTO_TOKEN
+        sync: false
+      - key: MAGENTO_BASE_URL
+        value: https://console.tennisoutlet.in/rest/V1
+      - key: MAGENTO_STORE_URL
+        value: https://tennisoutlet.in
+      - key: OPENROUTER_MODEL
+        value: openai/gpt-4o
+      - key: PORT
+        value: 3000
+      - key: NODE_ENV
+        value: production
