@@ -5,9 +5,9 @@
 const axios = require('axios');
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-// v4.1.1: default to Claude Opus via OpenRouter. Override with OPENROUTER_MODEL env if needed.
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-opus-4';
-const OPENROUTER_ROUTER_MODEL = process.env.OPENROUTER_ROUTER_MODEL || 'anthropic/claude-haiku-4.5';
+// v4.1.2: revert to previous defaults. Override with OPENROUTER_MODEL env if needed.
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-4o';
+const OPENROUTER_ROUTER_MODEL = process.env.OPENROUTER_ROUTER_MODEL || 'openai/gpt-4o-mini';
 const STORE_URL = process.env.MAGENTO_STORE_URL || 'https://tennisoutlet.in';
 
 async function callLLM({ model, messages, tools, tool_choice = 'auto', temperature = 0.7, max_tokens = 1600, response_format = null }) {
