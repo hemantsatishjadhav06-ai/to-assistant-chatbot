@@ -7,7 +7,10 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { masterHandle } = require('./agents');
 const slotParser = require('./parser');
-const sessionStore = require('./session');
+const sessionStore = require('./session');        // v3.3 fallback (sync, in-memory)
+const memory      = require('./memory');           // v4.0 Postgres-backed
+const identity    = require('./identity');
+const db          = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1243,30 +1246,56 @@ app.post('/api/chat-agents', async (req, res) => {
       return res.status(400).json({ error: 'Messages array is required' });
     }
 
-    // ===== v3.3: session + deterministic slot parsing =====
-    const sessionId = sessionStore.fallbackId(req);
+    // ===== v4.0: identity → memory → parser → master =====
+    const sessionId = memory.fallbackId(req);
     const lastUser = [...messages].reverse().find(m => m.role === 'user')?.content || '';
 
-    // Reset word? Drop prior session state.
+    // Reset word? Drop prior session state (memory + legacy cache).
     if (slotParser.shouldReset(lastUser)) {
+      await memory.reset(sessionId);
       sessionStore.reset(sessionId);
     }
 
-    const prior = sessionStore.get(sessionId).slots || {};
+    // 1) Load prior session state (Postgres-backed, with fallback to empty).
+    const priorState = await memory.get(sessionId);
+    const prior = priorState.slots || {};
+
+    // 2) Parse this turn (adds email/phone/consent).
     const fresh = slotParser.parseSlots(lastUser);
-    const merged = slotParser.mergeSlots(prior, fresh);
+
+    // 3) Resolve identity. Only hydrates preferences when consent=true.
+    const idRes = await identity.resolveForTurn({
+      sessionState: priorState,
+      parsedSlots: fresh
+    });
+
+    // 4) Handle explicit consent changes.
+    if (fresh.consent === 'grant' && idRes.customer_id) {
+      await identity.grantConsent(idRes.customer_id);
+    } else if (fresh.consent === 'revoke' && idRes.customer_id) {
+      await identity.revokeConsent(idRes.customer_id);
+    }
+
+    // 5) Merge: prior < preferences (consent-gated) < fresh. Fresh always wins.
+    const withPrefs = slotParser.mergeSlots(prior, idRes.preferences || {});
+    const merged = slotParser.mergeSlots(withPrefs, fresh);
     merged._rendered = slotParser.renderSlotsHint(merged);
 
-    // Persist merged slots for next turn.
-    sessionStore.update(sessionId, { slots: merged });
+    // 6) Persist.
+    await memory.update(sessionId, { slots: merged, customer_id: idRes.customer_id });
 
-    // Humanized session hint for the LLM (only if there's prior context).
-    const turns = sessionStore.get(sessionId).turns || 0;
+    const turns = (priorState.turns || 0) + 1;
     const sessionHint = (turns > 1 && prior && Object.keys(prior).some(k => prior[k] != null && k !== '_rendered'))
       ? `Previous turn slots: ${slotParser.renderSlotsHint(prior) || '(none)'}. Current merged slots: ${merged._rendered || '(none)'}`
       : '';
 
-    console.log(`[session:${sessionId}] turn=${turns} slots={${merged._rendered}}`);
+    console.log(`[session:${sessionId}] turn=${turns} cust=${idRes.customer_id || 'anon'} consent=${idRes.consent} slots={${merged._rendered}}`);
+
+    // 7) Log the user turn (best-effort).
+    memory.logMessage({
+      session_id: sessionId, customer_id: idRes.customer_id,
+      role: 'user', content: lastUser, intent: fresh.intent_hint, slots: merged
+    }).catch(() => {});
 
     const result = await masterHandle({
       userMessages: messages,
@@ -1276,8 +1305,13 @@ app.post('/api/chat-agents', async (req, res) => {
       sessionHint
     });
 
-    // Attach session id so clients can pin it across turns if they want.
-    res.json({ ...result, session_id: sessionId, slots: merged });
+    // Log assistant reply (best-effort).
+    memory.logMessage({
+      session_id: sessionId, customer_id: idRes.customer_id,
+      role: 'assistant', content: result?.message || result?.reply || ''
+    }).catch(() => {});
+
+    res.json({ ...result, session_id: sessionId, slots: merged, customer_id: idRes.customer_id, consent: idRes.consent });
   } catch (error) {
     console.error('Multi-agent error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
@@ -1297,11 +1331,16 @@ app.get('/api/health', async (req, res) => {
     } else { oauthStatus = 'not-configured'; }
   } catch { oauthStatus = 'disconnected'; }
 
+  const supa = await db.ping();
+
   res.json({
     status: 'running',
     magento_bearer: magentoStatus,
     magento_oauth: oauthStatus,
+    supabase: supa.ok ? 'connected' : `disconnected:${supa.reason}`,
+    memory: memory.stats(),
     model: OPENROUTER_MODEL,
+    version: '4.0-alpha',
     timestamp: new Date().toISOString()
   });
 });
@@ -1310,11 +1349,16 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// v4: give identity module a handle to magentoGet so it can look up customers
+// by email. Done here (not at top of file) to avoid any circular-require risks.
+identity.init({ magentoGet });
+
 app.listen(PORT, async () => {
-  console.log(`\n\u{1F3BE} TO Assistant running on :${PORT}`);
+  console.log(`\n\u{1F3BE} TO Assistant v4.0-alpha running on :${PORT}`);
   console.log(`\u{1F916} Model: ${OPENROUTER_MODEL}`);
   console.log(`\u{1F517} Magento: ${MAGENTO_REST}`);
   console.log(`\u{1F510} OAuth configured: ${!!OAUTH_CONSUMER_KEY}`);
+  console.log(`\u{1F4BE} Persistence: ${db.enabled ? 'Supabase' : 'memory-only (SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY not set)'}`);
   console.log(`[startup] Loading Magento attribute options...`);
   await loadAttributeOptions();
   console.log(`[startup] Attribute cache ready.`);

@@ -160,6 +160,26 @@ function extractOrderId(text) {
   return m ? m[1] : null;
 }
 
+// v4: identity extractors. Email is the primary customer key; phone secondary.
+function extractEmail(text) {
+  const m = text.match(/\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b/);
+  return m ? m[0].toLowerCase() : null;
+}
+
+function extractPhone(text) {
+  // Indian mobile: optional +91, optional space/dash, 10 digits starting 6-9.
+  const m = text.match(/(?:\+?91[\s-]?)?\b([6-9]\d{9})\b/);
+  return m ? m[1] : null;
+}
+
+// Explicit consent phrases. Used by identity.grantConsent when true.
+function detectConsentIntent(text) {
+  const s = (text || '').toLowerCase();
+  if (/\b(remember me|save my (preferences|details|profile)|keep my (size|details)|you can remember|save for next time)\b/.test(s)) return 'grant';
+  if (/\b(forget me|delete my (data|profile|preferences)|don'?t remember|wipe my (data|profile))\b/.test(s)) return 'revoke';
+  return null;
+}
+
 function extractIntentHint(text) {
   const s = text.toLowerCase().trim();
   if (/^(hi|hello|hey|hii|good (morning|afternoon|evening)|namaste)\s*\W*$/i.test(s)) return 'greeting';
@@ -197,6 +217,9 @@ function parseSlots(text) {
     gender:      extractGender(t),
     court_type:  extractCourt(t),
     order_id:    extractOrderId(t),
+    email:       extractEmail(t),
+    phone:       extractPhone(t),
+    consent:     detectConsentIntent(t),
     intent_hint: extractIntentHint(t),
     sort:        extractSort(t),
     compare:     /\b(vs|versus|compare|comparison|difference between)\b/i.test(t)
