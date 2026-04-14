@@ -32,7 +32,11 @@ app.use('/api/', limiter);
 
 // ==================== CONFIG ====================
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-4o';
+// v4.2.10: default to Qwen 2.5 72B Instruct — stronger tool-calling
+// consistency than gpt-4o at a fraction of the cost on OpenRouter. Override
+// with the OPENROUTER_MODEL env var on Render if you want to A/B another
+// model (e.g. anthropic/claude-3.5-sonnet, qwen/qwen3-235b-a22b).
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'qwen/qwen-2.5-72b-instruct';
 const MAGENTO_BASE_URL_RAW = process.env.MAGENTO_BASE_URL || 'https://console.tennisoutlet.in';
 // Normalize: strip trailing slash, strip existing /rest/V1 if env already included it
 const MAGENTO_ROOT = MAGENTO_BASE_URL_RAW.replace(/\/+$/, '').replace(/\/rest\/V1$/i, '');
@@ -998,8 +1002,17 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, keyword = 
     filters.push({ group: idx++, field: 'category_id', value: catId });
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
-    // CRITICAL: exclude grip-size child variants; only return parent products
-    filters.push({ group: idx++, field: 'type_id', value: 'configurable' });
+    // v4.2.10 CRITICAL FIX: only tennis racquets are stored as `configurable`
+    // (they have grip-size variants). Padel rackets and pickleball paddles
+    // are `type_id=simple` in Magento — forcing configurable returned 0 items
+    // and caused the persistent "issue retrieving the padel racquets" error.
+    // Verified live: cat 272 (padel) = 337 simple items; cat 250 (pickleball)
+    // = 500 simple items. Tennis (cat 25) remains configurable-only to avoid
+    // returning every grip-size child as a separate row.
+    const sportLc = String(sport).toLowerCase();
+    if (sportLc === 'tennis') {
+      filters.push({ group: idx++, field: 'type_id', value: 'configurable' });
+    }
 
     if (brand) {
       const bid = brandNameToId(brand);
