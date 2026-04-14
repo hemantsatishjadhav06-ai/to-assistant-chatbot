@@ -194,7 +194,9 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
           size: { type: "string", description: "Shoe size the customer wants (e.g. '10', '9.5'). Filters to products where that size's child SKU is in stock." },
           min_price: { type: "number", description: "Optional minimum price in INR." },
           max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand before calling: '5K'->5000, '1L'->100000, 'under 8000'->8000." },
-          page_size: { type: "integer", default: 10 }
+          page_size: { type: "integer", default: 5 },
+          offset: { type: "integer", default: 0, description: "Skip this many already-shown products. Use for 'more options' / 'next' — pass the previous call's next_offset." },
+          exclude_skus: { type: "array", items: { type: "string" }, description: "SKUs already shown to the user in this session. Prevents repeats when paginating." }
         }
       }
     }
@@ -765,7 +767,7 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
 // Categories: Tennis Shoes=24, Pickleball Shoes=253, Padel Shoes=274
 const SHOE_CATEGORIES = { tennis: 24, pickleball: 253, padel: 274 };
 
-async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = null, court_type = null, width = null, cushioning = null, size = null, min_price = null, max_price = null, page_size = 10 } = {}) {
+async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = null, court_type = null, width = null, cushioning = null, size = null, min_price = null, max_price = null, page_size = 5, offset = 0, exclude_skus = [] } = {}) {
   try {
     const catId = SHOE_CATEGORIES[String(sport).toLowerCase()] || 24;
     const filters = [];
@@ -788,7 +790,9 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       if (match) filters.push({ group: idx++, field: code, value: match[0] });
     }
 
-    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 4, 100) };
+    // Wider fetch so pagination has runway across category. Magento cap 100/page.
+    const fetchPageSize = Math.min(Math.max((page_size + offset) * 4, 40), 100);
+    const params = { 'searchCriteria[pageSize]': fetchPageSize };
     filters.forEach(f => {
       params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
       params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
@@ -796,7 +800,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
 
     const result = await magentoGet('/products', params);
     if (!result.items || result.items.length === 0) {
-      return { products: [], total: 0, message: `No ${sport} shoes matched those filters.` };
+      return { products: [], total: 0, message: `No ${sport} shoes matched those filters.`, has_more: false, offset, next_offset: offset };
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
@@ -810,19 +814,29 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price, size });
     const filtered_out = beforeCustomer - pool.length;
-    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
-    stripInternals(available);
+    // Stable sort by stock; then honor exclude_skus + offset + page_size.
+    pool.sort((a, b) => b.qty - a.qty);
+    const excludeSet = new Set((Array.isArray(exclude_skus) ? exclude_skus : []).map(String));
+    const poolFiltered = excludeSet.size ? pool.filter(p => !excludeSet.has(String(p.sku))) : pool;
+    const windowed = poolFiltered.slice(offset, offset + Math.min(page_size, 20));
+    const has_more = poolFiltered.length > (offset + windowed.length);
+    const shown_skus = windowed.map(p => String(p.sku));
+    stripInternals(windowed);
     let message = null;
-    if (available.length === 0 && beforeCustomer > 0) {
+    if (windowed.length === 0 && beforeCustomer > 0) {
       const reasons = [];
       if (size) reasons.push(`size ${size}`);
       if (max_price) reasons.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
       if (min_price) reasons.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
-      message = `No ${sport} shoes match the requested filters${reasons.length ? ` (${reasons.join(', ')})` : ''}.`;
+      message = offset > 0
+        ? `No more ${sport} shoes beyond what was already shown${reasons.length ? ` (${reasons.join(', ')})` : ''}.`
+        : `No ${sport} shoes match the requested filters${reasons.length ? ` (${reasons.join(', ')})` : ''}.`;
     }
     return {
       sport, filters_applied: { brand, shoe_type, court_type, width, cushioning, size, min_price, max_price },
-      products: available, total: result.total_count, showing: available.length,
+      products: windowed, total: result.total_count, showing: windowed.length,
+      offset, next_offset: offset + windowed.length, has_more, shown_skus,
+      pool_size_after_filters: poolFiltered.length,
       filtered_out, message
     };
   } catch (error) {
@@ -1287,9 +1301,18 @@ app.post('/api/chat-agents', async (req, res) => {
     await memory.update(sessionId, { slots: merged, customer_id: idRes.customer_id });
 
     const turns = (priorState.turns || 0) + 1;
-    const sessionHint = (turns > 1 && prior && Object.keys(prior).some(k => prior[k] != null && k !== '_rendered'))
+    let sessionHint = (turns > 1 && prior && Object.keys(prior).some(k => prior[k] != null && k !== '_rendered'))
       ? `Previous turn slots: ${slotParser.renderSlotsHint(prior) || '(none)'}. Current merged slots: ${merged._rendered || '(none)'}`
       : '';
+
+    // v4.1.3: carry last-search pagination state so "more options" works.
+    // Stored inside slots._last_search (JSONB) to avoid a DB migration.
+    const priorSearch = (priorState.slots && priorState.slots._last_search) || null;
+    if (priorSearch && priorSearch.tool === 'get_shoes_with_specs') {
+      const shown = (priorSearch.shown_skus || []).length;
+      const nextOffset = priorSearch.next_offset ?? shown;
+      sessionHint += ` | LAST_SEARCH tool=${priorSearch.tool} args=${JSON.stringify(priorSearch.args || {})} shown_so_far=${shown} next_offset=${nextOffset} has_more=${!!priorSearch.has_more} exclude_skus=${JSON.stringify(priorSearch.shown_skus || [])}`;
+    }
 
     console.log(`[session:${sessionId}] turn=${turns} cust=${idRes.customer_id || 'anon'} consent=${idRes.consent} slots={${merged._rendered}}`);
 
@@ -1299,13 +1322,40 @@ app.post('/api/chat-agents', async (req, res) => {
       role: 'user', content: lastUser, intent: fresh.intent_hint, slots: merged
     }).catch(() => {});
 
+    // Wrap executeFunction so we can capture pagination state per-turn.
+    let captured = null;
+    const wrappedExecute = async (name, args) => {
+      const out = await executeFunction(name, args);
+      if (name === 'get_shoes_with_specs' && out && !out.error) {
+        // Accumulate already-shown SKUs across the turn so "more" never repeats.
+        const priorSkus = (priorSearch && priorSearch.tool === name) ? (priorSearch.shown_skus || []) : [];
+        const newSkus = out.shown_skus || [];
+        const mergedSkus = Array.from(new Set([...priorSkus, ...newSkus]));
+        captured = {
+          tool: name,
+          args: { ...(args || {}), offset: undefined, exclude_skus: undefined },
+          shown_skus: mergedSkus,
+          next_offset: (out.next_offset != null) ? out.next_offset : mergedSkus.length,
+          has_more: !!out.has_more,
+          pool_size_after_filters: out.pool_size_after_filters,
+          at: Date.now()
+        };
+      }
+      return out;
+    };
+
     const result = await masterHandle({
       userMessages: messages,
       allTools: FUNCTION_DEFINITIONS,
-      executeFunction,
+      executeFunction: wrappedExecute,
       slots: merged,
       sessionHint
     });
+
+    if (captured) {
+      // Persist alongside existing slots so memory.get() returns it on next turn.
+      memory.update(sessionId, { slots: { ...merged, _last_search: captured } }).catch(() => {});
+    }
 
     // Log assistant reply (best-effort).
     memory.logMessage({
