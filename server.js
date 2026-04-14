@@ -331,7 +331,10 @@ async function fetchStockMap(skus) {
       params[`searchCriteria[filter_groups][0][filters][${i}][value]`] = sku;
       params[`searchCriteria[filter_groups][0][filters][${i}][condition_type]`] = 'eq';
     });
-    const res = await magentoGet('/inventory/source-items', params);
+    // Try OAuth first (admin scope), fallback to bearer
+    let res;
+    try { res = await oauthGet('/inventory/source-items', params); }
+    catch { res = await magentoGet('/inventory/source-items', params); }
     if (res.items && res.items.length > 0) {
       res.items.forEach(it => {
         const s = it.sku;
@@ -345,7 +348,9 @@ async function fetchStockMap(skus) {
 
   await Promise.all(skus.map(async sku => {
     try {
-      const s = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`);
+      let s;
+      try { s = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`); }
+      catch { s = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`); }
       map[sku] = s.is_in_stock ? parseFloat(s.qty || 0) : 0;
     } catch { map[sku] = 0; }
   }));
@@ -386,9 +391,9 @@ async function getProductsByCategory(categoryId, pageSize = 10) {
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-    const available = result.items
-      .map(item => shapeProduct(item, stockMap[item.sku] || 0))
-      .filter(p => p.qty >= 1)
+    const allZero = Object.values(stockMap).every(v => !v);
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+    const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, Math.min(pageSize, 20));
     return { products: available, total: result.total_count, showing: available.length };
@@ -417,9 +422,9 @@ async function searchProducts(query, pageSize = 10) {
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-    const available = result.items
-      .map(item => shapeProduct(item, stockMap[item.sku] || 0))
-      .filter(p => p.qty >= 1)
+    const allZero = Object.values(stockMap).every(v => !v);
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+    const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, Math.min(pageSize, 20));
     return { products: available, total: result.total_count, showing: available.length, query };
