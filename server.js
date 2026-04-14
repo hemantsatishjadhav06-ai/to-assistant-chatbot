@@ -162,6 +162,8 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
         type: "object",
         properties: {
           category_id: { type: "integer" },
+          min_price: { type: "number", description: "Optional minimum price in INR (resolved against enriched configurable-child price)." },
+          max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand: '5K'->5000, '1L'/'1 lakh'->100000." },
           page_size: { type: "integer", description: "Max products (default 10, max 20)", default: 10 }
         },
         required: ["category_id"]
@@ -172,16 +174,19 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
     type: "function",
     function: {
       name: "get_shoes_with_specs",
-      description: "Return shoes from TennisOutlet with FULL resolved specs (brand, court_type, width, cushioning, shoe_type, shoe_weight, inner/outer material, outsole, made_in_country, available UK/INDIA sizes). Use this for ANY shoe query about brand, size availability, or spec filtering. Accepts optional filters.",
+      description: "Return shoes from TennisOutlet with FULL resolved specs. Use this for ANY shoe query including brand, size availability, price caps, or spec filtering. All filters optional and AND-combined. Size filter checks child SKU stock — if the requested size is out of stock the product is excluded.",
       parameters: {
         type: "object",
         properties: {
           sport: { type: "string", enum: ["tennis", "pickleball", "padel"], default: "tennis" },
-          brand: { type: "string", description: "Brand name like 'ASICS', 'Nike', 'Babolat', 'Adidas'. Optional." },
+          brand: { type: "string", description: "Brand name like 'ASICS', 'Nike', 'Adidas'. Optional." },
           shoe_type: { type: "string", description: "Men's / Women's / Kid's. Optional." },
           court_type: { type: "string", description: "All Court / Clay Court / Hard Court / Padel Court / Pickleball Court. Optional." },
           width: { type: "string", description: "Narrow / Medium / Wide. Optional." },
           cushioning: { type: "string", description: "Low / Medium / High. Optional." },
+          size: { type: "string", description: "Shoe size the customer wants (e.g. '10', '9.5'). Filters to products where that size's child SKU is in stock." },
+          min_price: { type: "number", description: "Optional minimum price in INR." },
+          max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand before calling: '5K'->5000, '1L'->100000, 'under 8000'->8000." },
           page_size: { type: "integer", default: 10 }
         }
       }
@@ -191,13 +196,15 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
     type: "function",
     function: {
       name: "get_racquets_with_specs",
-      description: "Return RACQUETS (not balls, not accessories) from the correct racquet category with brand resolved. ALWAYS use this for any query about racquets/rackets/paddles - NEVER use get_products_by_category for racquet queries. Tennis Racquets category=25, Padel Rackets=272, Pickleball Paddles=250. Optionally filter by brand and skill_level.",
+      description: "Return RACQUETS (not balls, not accessories) from the correct racquet category with brand resolved. ALWAYS use this for any query about racquets/rackets/paddles - NEVER use get_products_by_category for racquet queries. Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250. Supports brand, skill_level, and price filters.",
       parameters: {
         type: "object",
         properties: {
           sport: { type: "string", enum: ["tennis", "padel", "pickleball"], default: "tennis" },
           brand: { type: "string", description: "Brand name like Babolat, Head, Wilson, YONEX, Prince. Optional." },
           skill_level: { type: "string", enum: ["beginner", "intermediate", "advanced", "senior", "junior"], description: "Optional skill level filter." },
+          min_price: { type: "number", description: "Optional minimum price in INR." },
+          max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand before calling: '5K'->5000." },
           page_size: { type: "integer", default: 10 }
         }
       }
@@ -215,11 +222,13 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
     type: "function",
     function: {
       name: "search_products",
-      description: "Search the full TennisOutlet.in catalog by name/keyword. Returns only available (qty>=1) items, sorted highest-qty first for upsell.",
+      description: "Search the full TennisOutlet.in catalog by name/keyword. Returns only available (qty>=1) items, sorted highest-qty first. Supports price filters.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string" },
+          min_price: { type: "number", description: "Optional minimum price in INR." },
+          max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand: '5K'->5000, '1L'->100000." },
           page_size: { type: "integer", default: 10 }
         },
         required: ["query"]
@@ -508,7 +517,7 @@ function shapeProduct(item, qty) {
   return shaped;
 }
 
-async function getProductsByCategory(categoryId, pageSize = 10) {
+async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null } = {}) {
   try {
     const fetchSize = Math.max(pageSize * 3, 30);
     const params = {
@@ -532,16 +541,27 @@ async function getProductsByCategory(categoryId, pageSize = 10) {
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
-    const pool = inStock.length ? inStock : (allZero ? shaped : []);
+    let pool = inStock.length ? inStock : (allZero ? shaped : []);
+    const beforeCustomer = pool.length;
+    pool = applyPriceSizeFilters(pool, { min_price, max_price });
+    const filtered_out = beforeCustomer - pool.length;
     const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20));
-    return { products: available, total: result.total_count, showing: available.length };
+    stripInternals(available);
+    let message = null;
+    if (available.length === 0 && beforeCustomer > 0) {
+      const bits = [];
+      if (max_price) bits.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
+      if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
+      message = `No products in this category match the price filter${bits.length ? ` (${bits.join(', ')})` : ''}.`;
+    }
+    return { products: available, total: result.total_count, showing: available.length, filtered_out, message };
   } catch (error) {
     console.error('getProductsByCategory error:', error.response?.status, error.message);
     return { error: true, message: "Unable to fetch products at this time. Please try again." };
   }
 }
 
-async function searchProducts(query, pageSize = 10) {
+async function searchProducts(query, pageSize = 10, { min_price = null, max_price = null } = {}) {
   try {
     const fetchSize = Math.max(pageSize * 3, 30);
     const params = {
@@ -564,9 +584,20 @@ async function searchProducts(query, pageSize = 10) {
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
-    const pool = inStock.length ? inStock : (allZero ? shaped : []);
+    let pool = inStock.length ? inStock : (allZero ? shaped : []);
+    const beforeCustomer = pool.length;
+    pool = applyPriceSizeFilters(pool, { min_price, max_price });
+    const filtered_out = beforeCustomer - pool.length;
     const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20));
-    return { products: available, total: result.total_count, showing: available.length, query };
+    stripInternals(available);
+    let message = null;
+    if (available.length === 0 && beforeCustomer > 0) {
+      const bits = [];
+      if (max_price) bits.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
+      if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
+      message = `No matches for "${query}"${bits.length ? ` (${bits.join(', ')})` : ''}.`;
+    }
+    return { products: available, total: result.total_count, showing: available.length, filtered_out, message, query };
   } catch (error) {
     console.error('searchProducts error:', error.response?.status, error.message);
     return { error: true, message: "Unable to search products at this time. Please try again." };
@@ -577,7 +608,7 @@ async function searchProducts(query, pageSize = 10) {
 // Categories: Tennis Shoes=24, Pickleball Shoes=253, Padel Shoes=274
 const SHOE_CATEGORIES = { tennis: 24, pickleball: 253, padel: 274 };
 
-async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = null, court_type = null, width = null, cushioning = null, page_size = 10 } = {}) {
+async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = null, court_type = null, width = null, cushioning = null, size = null, min_price = null, max_price = null, page_size = 10 } = {}) {
   try {
     const catId = SHOE_CATEGORIES[String(sport).toLowerCase()] || 24;
     const filters = [];
@@ -617,11 +648,25 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
-    const pool = inStock.length ? inStock : (allZero ? shaped : []);
+    let pool = inStock.length ? inStock : (allZero ? shaped : []);
+    // Customer-requested filters: size, min_price, max_price.
+    const beforeCustomer = pool.length;
+    pool = applyPriceSizeFilters(pool, { min_price, max_price, size });
+    const filtered_out = beforeCustomer - pool.length;
     const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
+    stripInternals(available);
+    let message = null;
+    if (available.length === 0 && beforeCustomer > 0) {
+      const reasons = [];
+      if (size) reasons.push(`size ${size}`);
+      if (max_price) reasons.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
+      if (min_price) reasons.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
+      message = `No ${sport} shoes match the requested filters${reasons.length ? ` (${reasons.join(', ')})` : ''}.`;
+    }
     return {
-      sport, filters_applied: { brand, shoe_type, court_type, width, cushioning },
-      products: available, total: result.total_count, showing: available.length
+      sport, filters_applied: { brand, shoe_type, court_type, width, cushioning, size, min_price, max_price },
+      products: available, total: result.total_count, showing: available.length,
+      filtered_out, message
     };
   } catch (error) {
     console.error('getShoesWithSpecs error:', error.response?.status, error.message);
@@ -633,7 +678,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
 // Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250
 const RACQUET_CATEGORIES = { tennis: 25, padel: 272, pickleball: 250 };
 
-async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_level = null, page_size = 10 } = {}) {
+async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_level = null, min_price = null, max_price = null, page_size = 10 } = {}) {
   try {
     const catId = RACQUET_CATEGORIES[String(sport).toLowerCase()] || 25;
     const filters = [];
@@ -672,11 +717,23 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
-    const pool = inStock.length ? inStock : (allZero ? shaped : []);
+    let pool = inStock.length ? inStock : (allZero ? shaped : []);
+    const beforeCustomer = pool.length;
+    pool = applyPriceSizeFilters(pool, { min_price, max_price });
+    const filtered_out = beforeCustomer - pool.length;
     const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
+    stripInternals(available);
+    let message = null;
+    if (available.length === 0 && beforeCustomer > 0) {
+      const bits = [];
+      if (max_price) bits.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
+      if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
+      message = `No ${sport} racquets match the requested filters${bits.length ? ` (${bits.join(', ')})` : ''}.`;
+    }
     return {
-      sport, filters_applied: { brand, skill_level },
-      products: available, total: result.total_count, showing: available.length
+      sport, filters_applied: { brand, skill_level, min_price, max_price },
+      products: available, total: result.total_count, showing: available.length,
+      filtered_out, message
     };
   } catch (error) {
     console.error('getRacquetsWithSpecs error:', error.response?.status, error.message);
@@ -686,7 +743,8 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
 
 // Resolve configurable-parent price AND aggregate stock from children, in parallel.
 // Magento stores price=0 and qty=0 on configurable parents; real values live on children.
-// After this runs, p.price / p.price_max / p.qty reflect the child aggregate.
+// After this runs, p.price / p.price_max / p.qty reflect the child aggregate, and
+// p._children holds per-child {sku, price, qty, size} for downstream size/price filtering.
 async function enrichConfigurables(products) {
   const targets = products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
   if (targets.length === 0) return products;
@@ -703,17 +761,60 @@ async function enrichConfigurables(products) {
       }
       const sp = children.map(c => parseFloat(c.special_price || 0)).filter(v => v > 0);
       if (sp.length && !p.special_price) p.special_price = Math.min(...sp);
-      // Stock: sum child quantities via MSI / stockItems.
+      // Stock: per-child and summed.
+      let stockMap = {};
       try {
         const childSkus = children.map(c => c.sku);
-        const stockMap = await fetchStockMap(childSkus);
+        stockMap = await fetchStockMap(childSkus);
         const total = Object.values(stockMap).reduce((a, b) => a + (parseFloat(b) || 0), 0);
         if (total > 0) p.qty = total;
       } catch { /* keep parent qty */ }
+      // Per-child detail for size / price filtering
+      p._children = children.map(c => {
+        const attrs = {};
+        (c.custom_attributes || []).forEach(a => { attrs[a.attribute_code] = a.value; });
+        const rawSize = attrs.shoe_size;
+        const sizeLabel = rawSize ? resolveAttr('shoe_size', rawSize) : null;
+        return {
+          sku: c.sku,
+          price: parseFloat(c.price || 0) || null,
+          qty: parseFloat(stockMap[c.sku] || 0),
+          size: Array.isArray(sizeLabel) ? sizeLabel.join(',') : sizeLabel
+        };
+      });
     } catch {
       // leave as-is; downstream filter will drop if qty<1
     }
   }));
+  return products;
+}
+
+// Post-enrichment filters: price cap / floor, and shoe size availability.
+// Size match is parsed as the first numeric token of each label so "10" matches
+// "10 UK" or "10.0"; same parse applied to the customer's requested size.
+function applyPriceSizeFilters(products, { min_price = null, max_price = null, size = null } = {}) {
+  const min = (min_price != null && isFinite(parseFloat(min_price))) ? parseFloat(min_price) : null;
+  const max = (max_price != null && isFinite(parseFloat(max_price))) ? parseFloat(max_price) : null;
+  const want = size ? parseFloat(String(size).match(/[\d.]+/)?.[0] || '') : null;
+  return products.filter(p => {
+    const price = parseFloat(p.price || 0);
+    if (max != null && price > 0 && price > max) return false;
+    if (min != null && price > 0 && price < min) return false;
+    if (want != null && !isNaN(want)) {
+      if (!Array.isArray(p._children) || p._children.length === 0) return false;
+      const hit = p._children.some(c => {
+        const got = parseFloat(String(c.size || '').match(/[\d.]+/)?.[0] || '');
+        return !isNaN(got) && got === want && (c.qty || 0) >= 1;
+      });
+      if (!hit) return false;
+    }
+    return true;
+  });
+}
+
+// Strip internal-only fields before returning to the LLM (keeps payload small).
+function stripInternals(products) {
+  (products || []).forEach(p => { if (p && p._children) delete p._children; });
   return products;
 }
 
@@ -727,8 +828,8 @@ function listBrands() {
 async function executeFunction(name, args) {
   switch (name) {
     case 'get_order_status': return await getOrderStatus(args.order_id);
-    case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size);
-    case 'search_products': return await searchProducts(args.query, args.page_size);
+    case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size, { min_price: args.min_price, max_price: args.max_price });
+    case 'search_products': return await searchProducts(args.query, args.page_size, { min_price: args.min_price, max_price: args.max_price });
     case 'get_shoes_with_specs': return await getShoesWithSpecs(args || {});
     case 'get_racquets_with_specs': return await getRacquetsWithSpecs(args || {});
     case 'list_brands': return listBrands();

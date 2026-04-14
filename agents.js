@@ -84,14 +84,27 @@ ${COMMON_RULES}`,
 
   racquet: `You are RacquetAgent for TennisOutlet.in. You ONLY recommend racquets/rackets/paddles.
 - You MUST call get_racquets_with_specs for every query. Pass sport (tennis/padel/pickleball), brand if mentioned, skill_level if mentioned.
+- PRICE FILTERS: parse any price cap/floor in the user's message into numbers and pass them.
+  - "under 5K" / "below 5k" / "less than 5000" / "upto 5k" / "<5k" -> max_price: 5000
+  - "5K" = 5000. "1L" or "1 lakh" = 100000.
+  - "above 3k" / "over 3000" -> min_price: 3000
+  - Ranges like "5-10k" -> min_price: 5000, max_price: 10000
 - After listing 4-5 products, add a one-line comparative insight (beginner vs intermediate, power vs control).
 - Grip size is selected on the product page - mention this if the user asks about size.
+- ZERO-RESULTS HANDLING: if the tool returns products: [] with a message, DO NOT invent products and DO NOT silently drop the filter. Say honestly: "I don't have {sport} racquets in that price range. Our most affordable {sport} racquets start around \u20B9X,XXX — want me to show those?" You may re-call once without the price filter to quote the actual entry-level price.
 ${COMMON_RULES}`,
 
   shoe: `You are ShoeAgent for TennisOutlet.in. You ONLY recommend shoes.
 - You MUST call get_shoes_with_specs. Pass sport, brand, shoe_type (Men's/Women's/Kid's), court_type, width, cushioning when mentioned.
+- SIZE FILTER: if the user mentions a shoe size (e.g. "size 10", "UK 9", "9.5") pass it as size: "10". The tool only returns products whose requested-size child SKU is in stock.
+- PRICE FILTERS: parse the user's price cap/floor into numbers and pass them.
+  - "under 5K" / "below 5000" / "less than 5k" / "upto 5k" / "<5k" -> max_price: 5000
+  - "5K" = 5000. "1L" = 100000.
+  - "above 3k" / "over 3000" -> min_price: 3000
+  - Ranges like "5-10k" -> min_price: 5000, max_price: 10000
 - Include relevant resolved specs in the product lines when helpful (court type, cushioning, available sizes).
-- NEVER say "we don't have size X". Instead show 4-5 products and add: "All sizes (including the size you mentioned) can be selected on each product page. If a specific size is sold out, it will be marked on that page."
+- ZERO-RESULTS HANDLING (critical): if products: [] with a message, DO NOT fall back to listing unfiltered shoes. Be honest: "I don't currently have {sport} shoes matching {size/price}. Our closest options start around \u20B9X,XXX — would you like to see those?" You may make one follow-up call without the failing filter to find that entry price.
+- When the tool DOES return products, every item already passed the size/price filter — list as-is. Do NOT add the "sizes can be selected on the product page" disclaimer, because the tool already verified the requested size is in stock.
 - We do NOT carry New Balance - recommend alternatives.
 ${COMMON_RULES}`,
 
@@ -103,7 +116,12 @@ ${COMMON_RULES}`,
   catalog: `You are CatalogAgent for TennisOutlet.in. You handle balls, strings, bags, accessories, sale items, or any non-racquet non-shoe product.
 - Prefer search_products for free-text queries.
 - Use get_products_by_category with these IDs: Tennis Balls=31, Pickleball Balls=252, Padel Balls=273, Strings=29, Bags=115, Accessories=37, Used Racquets=90, Wimbledon Sale=292, Grand Slam=349, Boxing Day=437.
-- Show 4-5 products minimum.
+- PRICE FILTERS: parse price caps/floors into numbers and pass min_price / max_price.
+  - "under 500" -> max_price: 500. "below 2K" -> max_price: 2000. "1L" = 100000.
+  - "above 1k" / "over 1000" -> min_price: 1000
+  - Ranges like "500-2000" -> min_price: 500, max_price: 2000
+- Show 4-5 products minimum when available.
+- ZERO-RESULTS HANDLING: if products: [] with a message, do not invent items. Tell the user nothing matched and offer to show the closest options without the filter.
 ${COMMON_RULES}`,
 
   policy: `You are PolicyAgent for TennisOutlet.in. You answer policy / support questions from the following knowledge (no tools available to you).
@@ -172,13 +190,49 @@ async function runSpecialist({ intent, sport, userMessages, allTools, executeFun
 }
 
 // ==================== SAFETY VALIDATORS ====================
-// Defense-in-depth: catch the racquet-as-balls bug class regardless of prompt.
-function validateResponse(intent, content) {
+// Parse a price cap from the user's message. Returns { min, max } in INR or nulls.
+function extractPriceBounds(userText) {
+  const out = { min: null, max: null };
+  if (!userText) return out;
+  const s = String(userText).toLowerCase();
+  const unit = u => (u === 'k' ? 1000 : (u === 'l' || u === 'lakh' || u === 'lakhs') ? 100000 : 1);
+  // Range: "5-10k", "5k-10k", "₹5000 - 10000"
+  const range = s.match(/\u20B9?\s*([\d.,]+)\s*(k|l|lakh|lakhs)?\s*[-\u2013to]+\s*\u20B9?\s*([\d.,]+)\s*(k|l|lakh|lakhs)?/);
+  if (range) {
+    const lo = parseFloat(range[1].replace(/,/g, '')) * unit(range[2]);
+    const hi = parseFloat(range[3].replace(/,/g, '')) * unit(range[4] || range[2]);
+    if (isFinite(lo) && isFinite(hi) && lo >= 0 && hi > lo) { out.min = lo; out.max = hi; return out; }
+  }
+  const maxM = s.match(/(?:under|below|less than|upto|up to|<|within|max(?:imum)?)\s*\u20B9?\s*([\d.,]+)\s*(k|l|lakh|lakhs)?/);
+  if (maxM) {
+    const n = parseFloat(maxM[1].replace(/,/g, '')) * unit(maxM[2]);
+    if (isFinite(n)) out.max = n;
+  }
+  const minM = s.match(/(?:above|over|more than|>|atleast|at least|min(?:imum)?)\s*\u20B9?\s*([\d.,]+)\s*(k|l|lakh|lakhs)?/);
+  if (minM) {
+    const n = parseFloat(minM[1].replace(/,/g, '')) * unit(minM[2]);
+    if (isFinite(n)) out.min = n;
+  }
+  return out;
+}
+
+// Pull every rupee amount (or range) out of the response body.
+function extractResponsePrices(content) {
+  const prices = [];
+  const re = /\u20B9\s*([\d,]+(?:\.\d+)?)(?:\s*-\s*\u20B9?\s*([\d,]+(?:\.\d+)?))?/g;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    const lo = parseFloat(m[1].replace(/,/g, ''));
+    const hi = m[2] ? parseFloat(m[2].replace(/,/g, '')) : lo;
+    if (isFinite(lo)) prices.push({ lo, hi });
+  }
+  return prices;
+}
+
+// Defense-in-depth: catch wrong-category links, placeholder prices, and cap violations.
+function validateResponse(intent, content, userText = '') {
   if (!content) return { ok: false, reason: 'empty_response' };
-  const c = content.toLowerCase();
   if (intent === 'racquet') {
-    // Product names in racquet responses must not contain "ball" or "string" etc.
-    // We check markdown links: [Name](url). If any link text includes a banned token, fail.
     const linkTexts = [...content.matchAll(/\[([^\]]+)\]\(/g)].map(m => m[1].toLowerCase());
     const banned = ['ball', 'string', 'grip tape', 'bag', 'shoe', 'sock'];
     const bad = linkTexts.find(t => banned.some(b => t.includes(b)));
@@ -189,6 +243,22 @@ function validateResponse(intent, content) {
     const banned = ['ball', 'racquet', 'racket', 'paddle', 'string ', 'grip'];
     const bad = linkTexts.find(t => banned.some(b => t.includes(b)));
     if (bad) return { ok: false, reason: `shoe_response_contains_non_shoe: "${bad}"` };
+  }
+  // Placeholder price leak (bug class we fixed in v3.2.2; keep a guard).
+  if (['shoe', 'racquet', 'catalog'].includes(intent) && /\u20B9\s*[xX],?[xX]{3}/.test(content)) {
+    return { ok: false, reason: 'price_placeholder_leak' };
+  }
+  // Price-cap violation: if user said "under N", no listed rupee amount may exceed N.
+  if (['shoe', 'racquet', 'catalog'].includes(intent)) {
+    const { min, max } = extractPriceBounds(userText);
+    if (max != null) {
+      const over = extractResponsePrices(content).find(p => p.lo > max);
+      if (over) return { ok: false, reason: `price_cap_violation_user_asked_under_${max}_response_has_${over.lo}` };
+    }
+    if (min != null) {
+      const under = extractResponsePrices(content).find(p => (p.hi || p.lo) < min);
+      if (under) return { ok: false, reason: `price_floor_violation_user_asked_over_${min}_response_has_${under.hi || under.lo}` };
+    }
   }
   return { ok: true };
 }
@@ -202,20 +272,20 @@ async function masterHandle({ userMessages, allTools, executeFunction }) {
     intent: route.intent, sport: route.sport,
     userMessages, allTools, executeFunction
   });
-  let validation = validateResponse(route.intent, specialist.content);
+  let validation = validateResponse(route.intent, specialist.content, lastUser);
   let retried = false;
   if (!validation.ok) {
     console.warn(`[validator] ${validation.reason} — retrying with stricter instruction`);
     retried = true;
     const stricter = [
       ...userMessages,
-      { role: 'system', content: `PREVIOUS RESPONSE WAS REJECTED: ${validation.reason}. You MUST call the correct tool for this intent (${route.intent}) and ONLY list products of that type. Do not include balls, strings, accessories, or other categories.` }
+      { role: 'system', content: `PREVIOUS RESPONSE WAS REJECTED: ${validation.reason}. Re-call the correct tool for intent=${route.intent}. If the user specified a size or price cap/floor, you MUST pass it (size, max_price, min_price). Only list products actually returned by the tool. If the tool returns products: [], do NOT fabricate items — tell the user honestly and offer to show the closest alternatives.` }
     ];
     specialist = await runSpecialist({
       intent: route.intent, sport: route.sport,
       userMessages: stricter, allTools, executeFunction
     });
-    validation = validateResponse(route.intent, specialist.content);
+    validation = validateResponse(route.intent, specialist.content, lastUser);
     if (!validation.ok) {
       console.error(`[validator] retry also failed: ${validation.reason}`);
       specialist.content = "I couldn't find the right products for that query — could you rephrase, or would you like me to connect you to +91 9502517700?";
