@@ -530,9 +530,10 @@ async function getProductsByCategory(categoryId, pageSize = 10) {
     const stockMap = await fetchStockMap(skus);
     const allZero = Object.values(stockMap).every(v => !v);
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
-    const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, Math.min(pageSize, 20));
+    await enrichConfigurables(shaped);
+    const inStock = shaped.filter(p => (p.qty || 0) >= 1);
+    const pool = inStock.length ? inStock : (allZero ? shaped : []);
+    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20));
     return { products: available, total: result.total_count, showing: available.length };
   } catch (error) {
     console.error('getProductsByCategory error:', error.response?.status, error.message);
@@ -561,9 +562,10 @@ async function searchProducts(query, pageSize = 10) {
     const stockMap = await fetchStockMap(skus);
     const allZero = Object.values(stockMap).every(v => !v);
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
-    const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, Math.min(pageSize, 20));
+    await enrichConfigurables(shaped);
+    const inStock = shaped.filter(p => (p.qty || 0) >= 1);
+    const pool = inStock.length ? inStock : (allZero ? shaped : []);
+    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20));
     return { products: available, total: result.total_count, showing: available.length, query };
   } catch (error) {
     console.error('searchProducts error:', error.response?.status, error.message);
@@ -612,10 +614,11 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const stockMap = await fetchStockMap(skus);
     const allZero = Object.values(stockMap).every(v => !v);
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
-    const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, Math.min(page_size, 20));
-    await enrichConfigurablePrices(available);
+    // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
+    await enrichConfigurables(shaped);
+    const inStock = shaped.filter(p => (p.qty || 0) >= 1);
+    const pool = inStock.length ? inStock : (allZero ? shaped : []);
+    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
     return {
       sport, filters_applied: { brand, shoe_type, court_type, width, cushioning },
       products: available, total: result.total_count, showing: available.length
@@ -667,10 +670,10 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const stockMap = await fetchStockMap(skus);
     const allZero = Object.values(stockMap).every(v => !v);
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
-    const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
-      .sort((a, b) => b.qty - a.qty)
-      .slice(0, Math.min(page_size, 20));
-    await enrichConfigurablePrices(available);
+    await enrichConfigurables(shaped);
+    const inStock = shaped.filter(p => (p.qty || 0) >= 1);
+    const pool = inStock.length ? inStock : (allZero ? shaped : []);
+    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
     return {
       sport, filters_applied: { brand, skill_level },
       products: available, total: result.total_count, showing: available.length
@@ -681,30 +684,34 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
   }
 }
 
-// Resolve configurable-parent price from first in-stock child, in parallel.
-// Magento often stores price=0 on configurable parents; children hold the real price.
-async function enrichConfigurablePrices(products) {
-  const needing = products.filter(p => !p.price || p.price === 0);
-  if (needing.length === 0) return products;
-  await Promise.all(needing.map(async p => {
+// Resolve configurable-parent price AND aggregate stock from children, in parallel.
+// Magento stores price=0 and qty=0 on configurable parents; real values live on children.
+// After this runs, p.price / p.price_max / p.qty reflect the child aggregate.
+async function enrichConfigurables(products) {
+  const targets = products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
+  if (targets.length === 0) return products;
+  await Promise.all(targets.map(async p => {
     try {
       const children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
-      if (Array.isArray(children) && children.length) {
-        // Pick the lowest non-zero price across children; fall back to first.
-        const prices = children.map(c => parseFloat(c.price || 0)).filter(v => v > 0);
-        if (prices.length) {
-          p.price = Math.min(...prices);
-          const maxP = Math.max(...prices);
-          if (maxP > p.price) p.price_max = maxP;
-        } else if (children[0].price) {
-          p.price = parseFloat(children[0].price);
-        }
-        // Also pull a special_price if any child has one
-        const sp = children.map(c => parseFloat(c.special_price || 0)).filter(v => v > 0);
-        if (sp.length && !p.special_price) p.special_price = Math.min(...sp);
+      if (!Array.isArray(children) || children.length === 0) return;
+      // Price: lowest non-zero across children; keep a max for ranges.
+      const prices = children.map(c => parseFloat(c.price || 0)).filter(v => v > 0);
+      if (prices.length) {
+        p.price = Math.min(...prices);
+        const maxP = Math.max(...prices);
+        if (maxP > p.price) p.price_max = maxP;
       }
-    } catch (e) {
-      // leave price as-is; the specialist will omit it gracefully
+      const sp = children.map(c => parseFloat(c.special_price || 0)).filter(v => v > 0);
+      if (sp.length && !p.special_price) p.special_price = Math.min(...sp);
+      // Stock: sum child quantities via MSI / stockItems.
+      try {
+        const childSkus = children.map(c => c.sku);
+        const stockMap = await fetchStockMap(childSkus);
+        const total = Object.values(stockMap).reduce((a, b) => a + (parseFloat(b) || 0), 0);
+        if (total > 0) p.qty = total;
+      } catch { /* keep parent qty */ }
+    } catch {
+      // leave as-is; downstream filter will drop if qty<1
     }
   }));
   return products;
