@@ -198,7 +198,9 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
           category_id: { type: "integer" },
           min_price: { type: "number", description: "Optional minimum price in INR (resolved against enriched configurable-child price)." },
           max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand: '5K'->5000, '1L'/'1 lakh'->100000." },
-          page_size: { type: "integer", description: "Max products (default 10, max 20)", default: 10 }
+          page_size: { type: "integer", description: "Max products (default 10, max 20)", default: 10 },
+          offset: { type: "integer", default: 0, description: "Skip this many already-shown products. Use for 'more options' / 'next' — pass the previous call's next_offset." },
+          exclude_skus: { type: "array", items: { type: "string" }, description: "SKUs already shown in this session. Prevents repeats when paginating." }
         },
         required: ["category_id"]
       }
@@ -241,7 +243,9 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
           skill_level: { type: "string", enum: ["beginner", "intermediate", "advanced", "senior", "junior"], description: "Optional skill level filter." },
           min_price: { type: "number", description: "Optional minimum price in INR." },
           max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand before calling: '5K'->5000." },
-          page_size: { type: "integer", default: 10 }
+          page_size: { type: "integer", default: 10 },
+          offset: { type: "integer", default: 0, description: "Skip this many already-shown racquets. Use for 'more options' / 'next' pagination." },
+          exclude_skus: { type: "array", items: { type: "string" }, description: "SKUs already shown in this session. Prevents repeats when paginating." }
         }
       }
     }
@@ -321,7 +325,9 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
           query: { type: "string" },
           min_price: { type: "number", description: "Optional minimum price in INR." },
           max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand: '5K'->5000, '1L'->100000." },
-          page_size: { type: "integer", default: 10 }
+          page_size: { type: "integer", default: 10 },
+          offset: { type: "integer", default: 0, description: "Skip this many already-shown products. Pagination." },
+          exclude_skus: { type: "array", items: { type: "string" }, description: "SKUs already shown in this session. Prevents repeats." }
         },
         required: ["query"]
       }
@@ -691,9 +697,9 @@ function shapeProduct(item, qty) {
   return shaped;
 }
 
-async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null } = {}) {
+async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, offset = 0, exclude_skus = [] } = {}) {
   try {
-    const fetchSize = Math.max(pageSize * 3, 30);
+    const fetchSize = Math.max((pageSize + offset) * 3, 30);
     const params = {
       'searchCriteria[filter_groups][0][filters][0][field]': 'category_id',
       'searchCriteria[filter_groups][0][filters][0][value]': categoryId,
@@ -719,8 +725,13 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
-    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20));
+    pool.sort((a, b) => b.qty - a.qty);
+    const excludeSet = new Set((Array.isArray(exclude_skus) ? exclude_skus : []).map(String));
+    const poolFiltered = excludeSet.size ? pool.filter(p => !excludeSet.has(String(p.sku))) : pool;
+    const available = poolFiltered.slice(offset, offset + Math.min(pageSize, 20));
     stripInternals(available);
+    const shown_skus = available.map(p => String(p.sku));
+    const has_more = poolFiltered.length > (offset + available.length);
     let message = null;
     if (available.length === 0 && beforeCustomer > 0) {
       const bits = [];
@@ -728,7 +739,11 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
       if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
       message = `No products in this category match the price filter${bits.length ? ` (${bits.join(', ')})` : ''}.`;
     }
-    return { products: available, total: result.total_count, showing: available.length, filtered_out, message };
+    return {
+      products: available, total: result.total_count, showing: available.length,
+      offset, next_offset: offset + available.length, has_more, shown_skus,
+      pool_size_after_filters: poolFiltered.length, filtered_out, message
+    };
   } catch (error) {
     console.error('getProductsByCategory error:', error.response?.status, error.message);
     return { error: true, message: "Unable to fetch products at this time. Please try again." };
@@ -765,9 +780,9 @@ const SEARCH_STOPWORDS = new Set([
   'review','reviews','rating','ratings','feedback','price','cost','available','stock'
 ]);
 
-async function searchProducts(query, pageSize = 10, { min_price = null, max_price = null } = {}) {
+async function searchProducts(query, pageSize = 10, { min_price = null, max_price = null, offset = 0, exclude_skus = [] } = {}) {
   try {
-    const fetchSize = Math.max(pageSize * 3, 30);
+    const fetchSize = Math.max((pageSize + offset) * 3, 30);
     let result = await magentoGet('/products', buildSearchParams(query, fetchSize));
 
     // Multi-word fallback: if zero hits on the full phrase, try each significant
@@ -800,8 +815,13 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
-    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20));
+    pool.sort((a, b) => b.qty - a.qty);
+    const excludeSet = new Set((Array.isArray(exclude_skus) ? exclude_skus : []).map(String));
+    const poolFiltered = excludeSet.size ? pool.filter(p => !excludeSet.has(String(p.sku))) : pool;
+    const available = poolFiltered.slice(offset, offset + Math.min(pageSize, 20));
     stripInternals(available);
+    const shown_skus = available.map(p => String(p.sku));
+    const has_more = poolFiltered.length > (offset + available.length);
     let message = null;
     if (available.length === 0 && beforeCustomer > 0) {
       const bits = [];
@@ -809,7 +829,11 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
       if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
       message = `No matches for "${query}"${bits.length ? ` (${bits.join(', ')})` : ''}.`;
     }
-    return { products: available, total: result.total_count, showing: available.length, filtered_out, message, query };
+    return {
+      products: available, total: result.total_count, showing: available.length,
+      offset, next_offset: offset + available.length, has_more, shown_skus,
+      pool_size_after_filters: poolFiltered.length, filtered_out, message, query
+    };
   } catch (error) {
     console.error('searchProducts error:', error.response?.status, error.message);
     return { error: true, message: "Unable to search products at this time. Please try again." };
@@ -902,7 +926,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
 // Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250
 const RACQUET_CATEGORIES = { tennis: 25, padel: 272, pickleball: 250 };
 
-async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_level = null, min_price = null, max_price = null, page_size = 10 } = {}) {
+async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_level = null, min_price = null, max_price = null, page_size = 10, offset = 0, exclude_skus = [] } = {}) {
   try {
     const catId = RACQUET_CATEGORIES[String(sport).toLowerCase()] || 25;
     const filters = [];
@@ -923,7 +947,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
       filters.push({ group: idx++, field: 'category_id', value: SKILL_CATS[String(skill_level).toLowerCase()] });
     }
 
-    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 4, 100) };
+    const params = { 'searchCriteria[pageSize]': Math.min(Math.max((page_size + offset) * 4, 40), 100) };
     filters.forEach(f => {
       params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
       params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
@@ -945,8 +969,13 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
-    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
+    pool.sort((a, b) => b.qty - a.qty);
+    const excludeSet = new Set((Array.isArray(exclude_skus) ? exclude_skus : []).map(String));
+    const poolFiltered = excludeSet.size ? pool.filter(p => !excludeSet.has(String(p.sku))) : pool;
+    const available = poolFiltered.slice(offset, offset + Math.min(page_size, 20));
     stripInternals(available);
+    const shown_skus = available.map(p => String(p.sku));
+    const has_more = poolFiltered.length > (offset + available.length);
     let message = null;
     if (available.length === 0 && beforeCustomer > 0) {
       const bits = [];
@@ -957,7 +986,8 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     return {
       sport, filters_applied: { brand, skill_level, min_price, max_price },
       products: available, total: result.total_count, showing: available.length,
-      filtered_out, message
+      offset, next_offset: offset + available.length, has_more, shown_skus,
+      pool_size_after_filters: poolFiltered.length, filtered_out, message
     };
   } catch (error) {
     console.error('getRacquetsWithSpecs error:', error.response?.status, error.message);
@@ -1188,8 +1218,8 @@ async function executeFunction(name, args) {
   switch (name) {
     case 'get_order_status': return await getOrderStatus(args.order_id);
     case 'list_recent_orders': return await listRecentOrders(args || {});
-    case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size, { min_price: args.min_price, max_price: args.max_price });
-    case 'search_products': return await searchProducts(args.query, args.page_size, { min_price: args.min_price, max_price: args.max_price });
+    case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size, { min_price: args.min_price, max_price: args.max_price, offset: args.offset, exclude_skus: args.exclude_skus });
+    case 'search_products': return await searchProducts(args.query, args.page_size, { min_price: args.min_price, max_price: args.max_price, offset: args.offset, exclude_skus: args.exclude_skus });
     case 'get_shoes_with_specs': return await getShoesWithSpecs(args || {});
     case 'get_racquets_with_specs': return await getRacquetsWithSpecs(args || {});
     case 'list_brands': return listBrands();
@@ -1361,8 +1391,9 @@ app.post('/api/chat-agents', async (req, res) => {
 
     // v4.1.3: carry last-search pagination state so "more options" works.
     // Stored inside slots._last_search (JSONB) to avoid a DB migration.
+    const PAGINATED_TOOLS = new Set(['get_shoes_with_specs', 'get_racquets_with_specs', 'get_products_by_category', 'search_products']);
     const priorSearch = (priorState.slots && priorState.slots._last_search) || null;
-    if (priorSearch && priorSearch.tool === 'get_shoes_with_specs') {
+    if (priorSearch && PAGINATED_TOOLS.has(priorSearch.tool)) {
       const shown = (priorSearch.shown_skus || []).length;
       const nextOffset = priorSearch.next_offset ?? shown;
       sessionHint += ` | LAST_SEARCH tool=${priorSearch.tool} args=${JSON.stringify(priorSearch.args || {})} shown_so_far=${shown} next_offset=${nextOffset} has_more=${!!priorSearch.has_more} exclude_skus=${JSON.stringify(priorSearch.shown_skus || [])}`;
@@ -1380,7 +1411,7 @@ app.post('/api/chat-agents', async (req, res) => {
     let captured = null;
     const wrappedExecute = async (name, args) => {
       const out = await executeFunction(name, args);
-      if (name === 'get_shoes_with_specs' && out && !out.error) {
+      if (PAGINATED_TOOLS.has(name) && out && !out.error) {
         // Accumulate already-shown SKUs across the turn so "more" never repeats.
         const priorSkus = (priorSearch && priorSearch.tool === name) ? (priorSearch.shown_skus || []) : [];
         const newSkus = out.shown_skus || [];
