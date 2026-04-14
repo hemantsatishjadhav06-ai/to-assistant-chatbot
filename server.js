@@ -169,6 +169,7 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
 
 // Build product URL: prefer url_key, else derive from name; drop trailing SKU-like suffixes; ensure .html
 function buildProductUrl(urlKey, name, sku) {
+  // Use Magento's canonical url_key as-is. It is the exact storefront slug.
   let key = urlKey;
   if (!key && name) {
     key = name.toLowerCase()
@@ -179,8 +180,7 @@ function buildProductUrl(urlKey, name, sku) {
       .replace(/-+/g, '-');
   }
   if (!key) key = (sku || '').toLowerCase();
-  // Strip trailing SKU-like suffixes like "-g2", "-3", "-l3-300g"
-  key = key.replace(/-[a-z]?\d+(?:-\d+[a-z]*)*$/i, '');
+  key = key.replace(/\.html?$/i, '');
   key = key.replace(/-+/g, '-').replace(/^-|-$/g, '');
   return `${MAGENTO_STORE_URL}/${key}.html`;
 }
