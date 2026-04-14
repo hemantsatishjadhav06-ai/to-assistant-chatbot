@@ -159,14 +159,26 @@ function specialistTools(allTools, intent) {
 }
 
 // ==================== RUN A SPECIALIST ====================
-async function runSpecialist({ intent, sport, userMessages, allTools, executeFunction }) {
+async function runSpecialist({ intent, sport, userMessages, allTools, executeFunction, enforcedFilters = '', sessionHint = '' }) {
   const system = AGENT_PROMPTS[intent] || AGENT_PROMPTS.other;
   const tools = specialistTools(allTools, intent);
   const messages = [
     { role: 'system', content: system },
-    { role: 'system', content: `Detected sport: ${sport}. Use this as the default if the user didn't specify otherwise.` },
-    ...userMessages
+    { role: 'system', content: `Detected sport: ${sport}. Use this as the default if the user didn't specify otherwise.` }
   ];
+  if (enforcedFilters) {
+    messages.push({
+      role: 'system',
+      content: `[ENFORCED FILTERS] The deterministic parser has extracted the following filters from the user's message. You MUST pass them verbatim to your tool call (do not re-parse, do not drop any): ${enforcedFilters}. If the tool returns zero products with these filters, DO NOT silently remove a filter — respond honestly and ask the user if they want to widen the search.`
+    });
+  }
+  if (sessionHint) {
+    messages.push({
+      role: 'system',
+      content: `[SESSION CONTEXT] ${sessionHint}. If the current user message is a short follow-up (e.g. just a size, just a price cap, just a brand), combine it with the filters above to continue the previous search rather than starting over.`
+    });
+  }
+  messages.push(...userMessages);
 
   let data = await callLLM({ model: OPENROUTER_MODEL, messages, tools, tool_choice: tools.length ? 'auto' : 'none' });
   let msg = data.choices[0].message;
@@ -264,13 +276,24 @@ function validateResponse(intent, content, userText = '') {
 }
 
 // ==================== MASTER ORCHESTRATOR ====================
-async function masterHandle({ userMessages, allTools, executeFunction }) {
+async function masterHandle({ userMessages, allTools, executeFunction, slots = null, sessionHint = '' }) {
   const lastUser = [...userMessages].reverse().find(m => m.role === 'user')?.content || '';
-  const route = await routeIntent(lastUser);
-  console.log(`[router] intent=${route.intent} sport=${route.sport} conf=${route.confidence}`);
+  // If slots include an intent_hint from the deterministic parser, prefer it
+  // over the LLM router (router is fine, but regex is free and always right
+  // on unambiguous cases like "shoe size 11 under 6K").
+  let route;
+  if (slots && slots.intent_hint) {
+    route = { intent: slots.intent_hint, sport: slots.sport || 'tennis', confidence: 0.99, source: 'deterministic' };
+  } else {
+    route = await routeIntent(lastUser);
+    route.source = 'llm_router';
+  }
+  console.log(`[router] intent=${route.intent} sport=${route.sport} conf=${route.confidence} source=${route.source}`);
+  const enforcedFilters = (slots && typeof slots._rendered === 'string') ? slots._rendered : '';
   let specialist = await runSpecialist({
     intent: route.intent, sport: route.sport,
-    userMessages, allTools, executeFunction
+    userMessages, allTools, executeFunction,
+    enforcedFilters, sessionHint
   });
   let validation = validateResponse(route.intent, specialist.content, lastUser);
   let retried = false;
@@ -283,7 +306,8 @@ async function masterHandle({ userMessages, allTools, executeFunction }) {
     ];
     specialist = await runSpecialist({
       intent: route.intent, sport: route.sport,
-      userMessages: stricter, allTools, executeFunction
+      userMessages: stricter, allTools, executeFunction,
+      enforcedFilters, sessionHint
     });
     validation = validateResponse(route.intent, specialist.content, lastUser);
     if (!validation.ok) {

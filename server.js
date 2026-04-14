@@ -6,6 +6,8 @@ const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { masterHandle } = require('./agents');
+const slotParser = require('./parser');
+const sessionStore = require('./session');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -951,12 +953,42 @@ app.post('/api/chat-agents', async (req, res) => {
     if (!messages || !Array.isArray(messages)) {
       return res.status(400).json({ error: 'Messages array is required' });
     }
+
+    // ===== v3.3: session + deterministic slot parsing =====
+    const sessionId = sessionStore.fallbackId(req);
+    const lastUser = [...messages].reverse().find(m => m.role === 'user')?.content || '';
+
+    // Reset word? Drop prior session state.
+    if (slotParser.shouldReset(lastUser)) {
+      sessionStore.reset(sessionId);
+    }
+
+    const prior = sessionStore.get(sessionId).slots || {};
+    const fresh = slotParser.parseSlots(lastUser);
+    const merged = slotParser.mergeSlots(prior, fresh);
+    merged._rendered = slotParser.renderSlotsHint(merged);
+
+    // Persist merged slots for next turn.
+    sessionStore.update(sessionId, { slots: merged });
+
+    // Humanized session hint for the LLM (only if there's prior context).
+    const turns = sessionStore.get(sessionId).turns || 0;
+    const sessionHint = (turns > 1 && prior && Object.keys(prior).some(k => prior[k] != null && k !== '_rendered'))
+      ? `Previous turn slots: ${slotParser.renderSlotsHint(prior) || '(none)'}. Current merged slots: ${merged._rendered || '(none)'}`
+      : '';
+
+    console.log(`[session:${sessionId}] turn=${turns} slots={${merged._rendered}}`);
+
     const result = await masterHandle({
       userMessages: messages,
       allTools: FUNCTION_DEFINITIONS,
-      executeFunction
+      executeFunction,
+      slots: merged,
+      sessionHint
     });
-    res.json(result);
+
+    // Attach session id so clients can pin it across turns if they want.
+    res.json({ ...result, session_id: sessionId, slots: merged });
   } catch (error) {
     console.error('Multi-agent error:', error.response?.data || error.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
