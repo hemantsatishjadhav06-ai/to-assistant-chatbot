@@ -166,6 +166,8 @@ function extractIntentHint(text) {
   if (/\b(review|reviews|rating|ratings|customer feedback|star|stars)\b/i.test(s)) return 'review';
   if (/\b(order|tracking|track|dispatch|shipment|delivery)\b/i.test(s) && extractOrderId(s)) return 'order';
   if (/\b(return|refund|shipping|warranty|policy|contact|store hours|phone|address|payment|emi|cod|coupon|welcome10)\b/i.test(s)) return 'policy';
+  // "sell my old racquet", "trade-in my aero", "buyback", "exchange my racquet" -> policy (TO evaluates case-by-case)
+  if (/\b(sell (my|the|an?|old|used) |trade[- ]?in|buy[- ]?back|exchange (my|the|an?|old|used)|give away my|part exchange)\b/i.test(s)) return 'policy';
   if (/\b(brands?|which brands?|what brands?)\b/i.test(s) && !/racquet|shoe|ball/i.test(s)) return 'brand';
   const cat = extractCategory(s);
   if (cat === 'shoes') return 'shoe';
