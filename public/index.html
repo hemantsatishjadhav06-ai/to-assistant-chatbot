@@ -387,15 +387,15 @@
 <body>
   <!-- Header -->
   <div class="header">
-    <div class="header-avatar">ð¾</div>
+    <div class="header-avatar">🎾</div>
     <div class="header-info">
       <h1>TO Assistant</h1>
-      <p><span class="status-dot"></span>Online â TennisOutlet.in Support</p>
+      <p><span class="status-dot"></span>Online — TennisOutlet.in Support</p>
     </div>
     <div class="header-links">
-      <a href="https://tennisoutlet.in" target="_blank">ð Shop</a>
-      <a href="https://tennisoutlet.in/buying-guide" target="_blank">ð Guide</a>
-      <a href="tel:+919502517700">ð Call Us</a>
+      <a href="https://tennisoutlet.in" target="_blank">🛒 Shop</a>
+      <a href="https://tennisoutlet.in/buying-guide" target="_blank">📖 Guide</a>
+      <a href="tel:+919502517700">📞 Call Us</a>
     </div>
   </div>
 
@@ -405,19 +405,19 @@
     <div class="message-wrapper">
       <div class="msg-avatar bot">TO</div>
       <div class="message bot">
-        Welcome to TennisOutlet! ð¾ How may I help you today?<br><br>
+        Welcome to TennisOutlet! 🎾 How may I help you today?<br><br>
         I can help you with order tracking, product recommendations, returns, and more!
       </div>
     </div>
 
     <!-- Quick Actions -->
     <div class="quick-actions" id="quickActions">
-      <button class="quick-btn" onclick="sendQuick('I want to check my order status')">ð¦ Track Order</button>
-      <button class="quick-btn" onclick="sendQuick('Show me best selling tennis racquets')">ð¾ Best Racquets</button>
-      <button class="quick-btn" onclick="sendQuick('I need a beginner tennis racquet recommendation')">ð Beginner Guide</button>
-      <button class="quick-btn" onclick="sendQuick('Tell me about pickleball paddles')">ð Pickleball</button>
-      <button class="quick-btn" onclick="sendQuick('What is your return policy?')">ð Returns</button>
-      <button class="quick-btn" onclick="sendQuick('I need help with my delivery')">ð Delivery Help</button>
+      <button class="quick-btn" onclick="sendQuick('I want to check my order status')">📦 Track Order</button>
+      <button class="quick-btn" onclick="sendQuick('Show me best selling tennis racquets')">🎾 Best Racquets</button>
+      <button class="quick-btn" onclick="sendQuick('I need a beginner tennis racquet recommendation')">🆕 Beginner Guide</button>
+      <button class="quick-btn" onclick="sendQuick('Tell me about pickleball paddles')">🏓 Pickleball</button>
+      <button class="quick-btn" onclick="sendQuick('What is your return policy?')">🔄 Returns</button>
+      <button class="quick-btn" onclick="sendQuick('I need help with my delivery')">🚚 Delivery Help</button>
     </div>
 
     <!-- Typing indicator -->
@@ -486,26 +486,42 @@
       sendMessage();
     }
 
-    // Format bot response (basic markdown)
+    // Format bot response (robust markdown)
     function formatResponse(text) {
       if (!text) return '';
-      return text
-        // Bold
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        // Links
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>')
-        // Bare URLs
-        .replace(/(https?:\/\/[^\s<]+)/g, (match) => {
-          if (match.includes('href=')) return match;
-          return `<a href="${match}" target="_blank">${match}</a>`;
-        })
-        // Line breaks
-        .replace(/\n\n/g, '</p><p>')
-        .replace(/\n/g, '<br>')
-        // Bullet points
-        .replace(/^[-â¢]\s+(.+)/gm, '<li>$1</li>')
-        // Wrap in paragraphs
-        ;
+
+      // Step 1: Remove any markdown image syntax ![alt](url)
+      text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '');
+
+      // Step 2: Clean up any raw HTML attributes that leaked (target="_blank"> etc)
+      text = text.replace(/"\s*target="_blank">/g, '');
+      text = text.replace(/target="_blank">/g, '');
+      text = text.replace(/<\/a>/g, '');
+
+      // Step 3: Bold
+      text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+      // Step 4: Markdown links [text](url) — clean any trailing quotes/attributes
+      text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s"]+)[^)]*\)/g, '<a href="$2" target="_blank">$1</a>');
+
+      // Step 5: Bare URLs (not already inside href)
+      text = text.replace(/(^|[^"=])(https?:\/\/[^\s<,)"]+)/gm, function(match, prefix, url) {
+        // Clean trailing punctuation
+        url = url.replace(/[.)]+$/, '');
+        return prefix + '<a href="' + url + '" target="_blank">' + url + '</a>';
+      });
+
+      // Step 6: Line breaks
+      text = text.replace(/\n\n/g, '</p><p>');
+      text = text.replace(/\n/g, '<br>');
+
+      // Step 7: Bullet points
+      text = text.replace(/^[-•]\s+(.+)/gm, '<li>$1</li>');
+
+      // Step 8: Clean up any double-wrapped links
+      text = text.replace(/<a[^>]*><a/g, '<a');
+
+      return text;
     }
 
     // Add message to chat
@@ -515,7 +531,7 @@
 
       const avatar = document.createElement('div');
       avatar.className = `msg-avatar ${isUser ? 'user' : 'bot'}`;
-      avatar.textContent = isUser ? 'ð¤' : 'TO';
+      avatar.textContent = isUser ? '👤' : 'TO';
 
       const msg = document.createElement('div');
       msg.className = `message ${isUser ? 'user' : 'bot'}`;
