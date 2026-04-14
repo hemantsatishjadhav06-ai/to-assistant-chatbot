@@ -81,7 +81,7 @@ const AGENT_PROMPTS = {
 - Share ONLY: order_id, status_label, created_at (date only), and tracking (carrier + AWB + tracking_url) if present.
 - NEVER reveal: amount, address, items/products ordered, payment method, customer name, personal info.
 - Use the tool's status_label verbatim (Magento's actual status — e.g. "Delivered", "Processing", "Shipped"). Do not paraphrase.
-- Use the tracking_url the tool returns as-is. It will be Blue Dart (bluedart.com/?<AWB>) or Delhivery (delhivery.com/track-v2/package/<AWB>). Never hard-code Blue Dart when the tool returned a Delhivery URL.
+- Use the tracking_url the tool returns as-is. It will be Blue Dart (www.bluedart.com/tracking?trackFor=0&trackNo=<AWB>) or Delhivery (www.delhivery.com/track-v2/package/<AWB>). Never hard-code Blue Dart when the tool returned a Delhivery URL.
 - Orders dispatch within 8 hours. Delivery 2-5 business days.
 - If no order found, politely ask the customer to verify the ID/email and suggest calling +91 9502517700 (Mon-Sat 10 AM - 6 PM).
 ${COMMON_RULES}`,
@@ -141,7 +141,7 @@ Store: Survey No. 47/A, near Sreenidhi International School, Aziznagar, Hyderaba
 Returns: 30-day return window from delivery. Item must be unused with tags intact. https://tennisoutlet.in/return-cancellation-policy
 Play & Return: ELIGIBILITY STRICT — only on RACQUETS priced ABOVE \u20B920,000. Not available on shoes, strings, balls, bags, accessories, or racquets \u2264 \u20B920,000. https://tennisoutlet.in/play-return-program
 Refunds: 48 hrs processing; bank credit up to 5 business days; TO Wallet instant.
-Shipping: dispatched within 8 hrs. Couriers: Blue Dart OR Delhivery (2-5 business days). Tracking links — Blue Dart: https://bluedart.com/?<AWB> ; Delhivery: https://www.delhivery.com/track-v2/package/<AWB>.
+Shipping: dispatched within 8 hrs. Couriers: Blue Dart OR Delhivery (2-5 business days). Tracking links — Blue Dart: https://www.bluedart.com/tracking?trackFor=0&trackNo=<AWB> ; Delhivery: https://www.delhivery.com/track-v2/package/<AWB>.
 Payment: Cards, Net Banking, UPI, EMI (coming within a week), COD.
 Warranty: https://tennisoutlet.in/warranty-promise
 Buying Guide: https://tennisoutlet.in/buying-guide

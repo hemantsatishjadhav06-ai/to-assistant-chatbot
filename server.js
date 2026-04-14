@@ -565,7 +565,7 @@ async function getOrderStatus(orderId) {
         if (awb) {
           tracking_url = isDelhivery
             ? `https://www.delhivery.com/track-v2/package/${awb}`
-            : `https://bluedart.com/?${awb}`;
+            : `https://www.bluedart.com/tracking?trackFor=0&trackNo=${awb}`;
         }
         tracking.push({ carrier, tracking_number: awb, tracking_url });
       }));
