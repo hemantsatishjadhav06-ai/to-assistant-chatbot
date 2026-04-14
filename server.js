@@ -420,7 +420,11 @@ function listAllCategories({ min_level = 1, active_only = true } = {}) {
 // ==================== ATTRIBUTE OPTION CACHE ====================
 // Maps attribute_code -> { optionValue: label }. Resolves IDs like 5452 -> "ASICS".
 const ATTR_OPTIONS = {};
-const ATTRS_TO_CACHE = ['brands', 'court_type', 'width', 'cushioning', 'shoe_type', 'shoe_size', 'color'];
+// Including common size-attribute fallbacks because Magento stores may use any
+// of these codes for configurable shoe sizes (resolveAttr looks up the first
+// one with populated options).
+const ATTRS_TO_CACHE = ['brands', 'court_type', 'width', 'cushioning', 'shoe_type', 'shoe_size', 'size', 'us_size', 'uk_size', 'eu_size', 'color'];
+const SIZE_ATTR_CANDIDATES = ['shoe_size', 'size', 'us_size', 'uk_size', 'eu_size'];
 
 async function loadAttributeOptions() {
   for (const code of ATTRS_TO_CACHE) {
@@ -895,6 +899,17 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price, size });
     const filtered_out = beforeCustomer - pool.length;
+    // Diagnostic: if a size filter eliminated the pool, log what child-size
+    // data we actually had so we can tune attribute-code detection in prod.
+    if (size && pool.length === 0 && beforeCustomer > 0) {
+      const sample = [];
+      for (const p of inStock.slice(0, 3)) {
+        for (const c of (p._children || []).slice(0, 4)) {
+          sample.push({ sku: c.sku, size: c.size, tokens: c._size_tokens, qty: c.qty });
+        }
+      }
+      console.log(`[size-filter miss] want=${size} parents=${beforeCustomer} sample=${JSON.stringify(sample)}`);
+    }
     // Stable sort by stock; then honor exclude_skus + offset + page_size.
     pool.sort((a, b) => b.qty - a.qty);
     const excludeSet = new Set((Array.isArray(exclude_skus) ? exclude_skus : []).map(String));
@@ -1032,17 +1047,47 @@ async function enrichConfigurables(products, { forceAll = false } = {}) {
         const total = Object.values(stockMap).reduce((a, b) => a + (parseFloat(b) || 0), 0);
         if (total > 0) p.qty = total;
       } catch { /* keep parent qty */ }
-      // Per-child detail for size / price filtering
+      // Per-child detail for size / price filtering. We collect EVERY candidate
+      // size signal (option label, SKU suffix, child name) so size filtering can
+      // survive attribute-code mismatches and unpopulated option maps.
       p._children = children.map(c => {
         const attrs = {};
         (c.custom_attributes || []).forEach(a => { attrs[a.attribute_code] = a.value; });
-        const rawSize = attrs.shoe_size;
-        const sizeLabel = rawSize ? resolveAttr('shoe_size', rawSize) : null;
+        const sizeTokens = new Set();
+        for (const code of SIZE_ATTR_CANDIDATES) {
+          const raw = attrs[code];
+          if (!raw) continue;
+          const resolved = resolveAttr(code, raw);
+          const str = Array.isArray(resolved) ? resolved.join(',') : String(resolved);
+          // Pull every numeric run out of the resolved string AND out of the raw
+          // (in case the options map didn't resolve — raw may itself be "7" or
+          // "UK 7" already on simple attributes).
+          for (const src of [str, String(raw)]) {
+            const matches = src.match(/\d+(?:\.\d+)?/g) || [];
+            matches.forEach(m => sizeTokens.add(m));
+          }
+        }
+        // Tennis-shoe SKUs at TO often end with the size, e.g. "...-7" or "-7UK".
+        const skuTail = String(c.sku || '').match(/[-_](\d+(?:\.\d+)?)[A-Za-z]*$/);
+        if (skuTail) sizeTokens.add(skuTail[1]);
+        // Product name sometimes carries "Size 7" or "US 7".
+        const nameSize = String(c.name || '').match(/\b(?:size|us|uk|eu)\s*(\d+(?:\.\d+)?)/i);
+        if (nameSize) sizeTokens.add(nameSize[1]);
+        // Choose a human label for display (first non-empty resolution).
+        let sizeLabel = null;
+        for (const code of SIZE_ATTR_CANDIDATES) {
+          const raw = attrs[code];
+          if (!raw) continue;
+          const resolved = resolveAttr(code, raw);
+          sizeLabel = Array.isArray(resolved) ? resolved.join(',') : resolved;
+          if (sizeLabel) break;
+        }
         return {
           sku: c.sku,
           price: parseFloat(c.price || 0) || null,
           qty: parseFloat(stockMap[c.sku] || 0),
-          size: Array.isArray(sizeLabel) ? sizeLabel.join(',') : sizeLabel
+          size: sizeLabel,
+          _size_tokens: Array.from(sizeTokens)
         };
       });
     } catch {
@@ -1065,9 +1110,14 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
     if (min != null && price > 0 && price < min) return false;
     if (want != null && !isNaN(want)) {
       if (!Array.isArray(p._children) || p._children.length === 0) return false;
+      // Match against the broadened _size_tokens set (labels, SKU suffixes,
+      // name tokens). Legacy: also accept the first numeric in c.size.
       const hit = p._children.some(c => {
+        if ((c.qty || 0) < 1) return false;
+        const tokens = Array.isArray(c._size_tokens) ? c._size_tokens : [];
+        if (tokens.some(t => parseFloat(t) === want)) return true;
         const got = parseFloat(String(c.size || '').match(/[\d.]+/)?.[0] || '');
-        return !isNaN(got) && got === want && (c.qty || 0) >= 1;
+        return !isNaN(got) && got === want;
       });
       if (!hit) return false;
     }
@@ -1079,7 +1129,10 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
 function stripInternals(products) {
   (products || []).forEach(p => {
     if (!p) return;
-    if (p._children) delete p._children;
+    if (p._children) {
+      (p._children || []).forEach(c => { if (c && c._size_tokens) delete c._size_tokens; });
+      delete p._children;
+    }
     if (p._type_id) delete p._type_id;
   });
   return products;
