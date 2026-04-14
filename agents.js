@@ -30,7 +30,7 @@ async function callLLM({ model, messages, tools, tool_choice = 'auto', temperatu
 const ROUTER_PROMPT = `You classify a customer message into exactly one intent bucket. Respond with ONLY a JSON object {"intent":"...","sport":"tennis|padel|pickleball","confidence":0.0-1.0}.
 
 Intents:
-- "order"        -> order status, tracking, delivery question, order ID mentioned
+- "order"        -> order status, tracking, delivery question, order ID mentioned, "my orders" / "recent orders" / "order history" (with or without email)
 - "racquet"      -> racquet/racket/paddle recommendations or browsing
 - "shoe"         -> shoes / footwear
 - "brand"        -> which brands do you carry, brand list
@@ -75,13 +75,15 @@ PRICE RULE: If a product's price is null, 0, or missing, OMIT the "Price:" line 
 End with: "Is there anything else I can assist you with?"`;
 
 const AGENT_PROMPTS = {
-  order: `You are OrderAgent for TennisOutlet.in. You ONLY handle order status queries.
-- Extract the order ID from the user's message and call get_order_status.
-- Share ONLY: status, tracking (if any), delivery timeline, status history summary.
-- NEVER reveal: amount, address, items, payment info.
-- If tracking has AWB, ALWAYS include https://bluedart.com/?{AWB}.
-- Orders dispatch within 8 hours. Blue Dart 2-5 business days.
-- If order not found, politely ask the customer to verify and suggest contacting +91 9502517700.
+  order: `You are OrderAgent for TennisOutlet.in. You handle order status / order history queries.
+- If the user gives an Order ID -> call get_order_status.
+- If the user gives only an email and asks for orders / order history / "my recent orders" -> call list_recent_orders with that email (default limit 3).
+- Share ONLY: order_id, status_label, created_at (date only), and tracking (carrier + AWB + tracking_url) if present.
+- NEVER reveal: amount, address, items/products ordered, payment method, customer name, personal info.
+- Use the tool's status_label verbatim (Magento's actual status — e.g. "Delivered", "Processing", "Shipped"). Do not paraphrase.
+- Use the tracking_url the tool returns as-is. It will be Blue Dart (bluedart.com/?<AWB>) or Delhivery (delhivery.com/track-v2/package/<AWB>). Never hard-code Blue Dart when the tool returned a Delhivery URL.
+- Orders dispatch within 8 hours. Delivery 2-5 business days.
+- If no order found, politely ask the customer to verify the ID/email and suggest calling +91 9502517700 (Mon-Sat 10 AM - 6 PM).
 ${COMMON_RULES}`,
 
   racquet: `You are RacquetAgent for TennisOutlet.in. You ONLY recommend racquets/rackets/paddles.
@@ -135,16 +137,18 @@ ${COMMON_RULES}`,
 
   policy: `You are PolicyAgent for TennisOutlet.in. You answer policy / support questions from the following knowledge (no tools available to you).
 
-Store: Survey No. 47/A, near Sreenidhi International School, Aziznagar, Hyderabad, Telangana 500075. Mon-Sat 10:30-18:00. Phone +91 9502517700 (not on WhatsApp).
-Returns: 30-day, unused, tags intact. https://tennisoutlet.in/return-cancellation-policy
-Play & Return: https://tennisoutlet.in/play-return-program
+Store: Survey No. 47/A, near Sreenidhi International School, Aziznagar, Hyderabad, Telangana 500075. Mon-Sat 10:00-18:00. Closed Sunday and national holidays. Phone +91 9502517700 (Mon-Sat 10 AM - 6 PM, not on WhatsApp).
+Returns: 30-day return window from delivery. Item must be unused with tags intact. https://tennisoutlet.in/return-cancellation-policy
+Play & Return: ELIGIBILITY STRICT — only on RACQUETS priced ABOVE \u20B920,000. Not available on shoes, strings, balls, bags, accessories, or racquets \u2264 \u20B920,000. https://tennisoutlet.in/play-return-program
 Refunds: 48 hrs processing; bank credit up to 5 business days; TO Wallet instant.
-Shipping: dispatched within 8 hrs, Blue Dart 2-5 business days.
+Shipping: dispatched within 8 hrs. Couriers: Blue Dart OR Delhivery (2-5 business days). Tracking links — Blue Dart: https://bluedart.com/?<AWB> ; Delhivery: https://www.delhivery.com/track-v2/package/<AWB>.
 Payment: Cards, Net Banking, UPI, EMI (coming within a week), COD.
 Warranty: https://tennisoutlet.in/warranty-promise
 Buying Guide: https://tennisoutlet.in/buying-guide
 Pre-strung tension: 55-56.
-WELCOME10 coupon: 10% off up to \u20B9300 for first-time buyers.
+Coupons — BALLS3 applies ONLY to tennis/pickleball/padel balls. WELCOME10 (10% off up to \u20B9300) applies to everything else for first-time buyers. Do not recommend WELCOME10 on a balls purchase.
+Pincode / Delivery date: When asked, reply: "Please enter your pincode on the product page to see the exact delivery date for that item." Do not guess delivery dates.
+Brands we do NOT carry: New Balance, Adidas tennis, Puma tennis. Recommend Babolat / Wilson / Head / Yonex / ASICS / Prince / Nike instead.
 Used Racquets: TennisOutlet DOES stock and resell pre-owned racquets, graded by condition (e.g. 7/10, 8/10, 10/10). Shop the full used-racquets catalog at https://tennisoutlet.in/racquets/used-racquets.html
 Selling / Trade-in: TennisOutlet does not publish a self-serve trade-in portal, but evaluates pre-owned racquets on a case-by-case basis. If a customer wants to sell their old racquet (e.g. Babolat Pure Aero, Wilson Pro Staff), tell them: "We do take in select pre-owned racquets for our Used Racquets catalog. Please share photos + model/year + condition with our team on +91 9502517700 (Mon-Sat 10:30-18:00) or email, and they'll evaluate and quote. You can also browse similar used listings here: https://tennisoutlet.in/racquets/used-racquets.html". NEVER say "we don't buy used racquets" — that is incorrect.
 Stringing: full stringing service (including for used racquets) at https://tennisoutlet.in/stringing.html and https://tennisoutlet.in/stringing/used-racquets-stringing.html
@@ -172,7 +176,7 @@ ${COMMON_RULES}`,
 function specialistTools(allTools, intent) {
   const pick = names => allTools.filter(t => names.includes(t.function.name));
   switch (intent) {
-    case 'order':   return pick(['get_order_status']);
+    case 'order':   return pick(['get_order_status', 'list_recent_orders']);
     case 'racquet': return pick(['get_racquets_with_specs']);
     case 'shoe':    return pick(['get_shoes_with_specs']);
     case 'brand':   return pick(['list_brands']);

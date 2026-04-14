@@ -65,14 +65,16 @@ GREETING:
 
 ORDER MANAGEMENT:
 - When a customer provides an Order ID, use get_order_status.
-- Share only status, tracking info, delivery timeline.
-- NEVER reveal amount, address, product items, or payment info.
-- When AWB is available, ALWAYS share Blue Dart tracking link: https://bluedart.com/?{AWB}
-- Orders dispatched within 8 hours. Delivery 2-5 business days (Blue Dart).
+- When a customer gives their email and asks for "my orders" / "recent orders" / "order history", call list_recent_orders.
+- Share ONLY: order_id, status / status_label, created_at, and tracking (carrier + AWB + tracking_url).
+- NEVER reveal amount, address, product line items, payment method, customer name, or any personal details.
+- Use the tool's status_label text verbatim (it mirrors Magento's real status, e.g. "Delivered", "Processing", "Shipped"). Do NOT invent extra wording.
+- Tracking links: the tool already returns the correct courier URL. Use tracking_url as-is. Blue Dart -> bluedart.com/?<AWB>. Delhivery -> delhivery.com/track-v2/package/<AWB>.
+- Orders dispatched within 8 hours. Delivery 2-5 business days.
 
 RETURNS/REFUNDS:
-- 30-day return policy (unused, tags intact). https://tennisoutlet.in/return-cancellation-policy
-- Play & Return: https://tennisoutlet.in/play-return-program
+- Return policy: 30 days from delivery, item unused with tags intact. Link: https://tennisoutlet.in/return-cancellation-policy
+- Play & Return program: ONLY eligible on RACQUETS priced ABOVE \u20B920,000. Do NOT suggest Play & Return for shoes, strings, balls, bags, accessories, or racquets \u2264 \u20B920,000. Link: https://tennisoutlet.in/play-return-program
 - Refunds: 48 hrs processing; bank credit up to 5 business days; TO Wallet instant.
 
 PRODUCTS:
@@ -111,8 +113,13 @@ ROUTING RULES (STRICT - follow these exactly):
 SMART GUIDELINES:
 - Beginner racquet -> get_racquets_with_specs({skill_level:"beginner"}) + add beginner advice (lighter, larger head size, forgiving).
 - Brand-specific racquet -> get_racquets_with_specs({brand:"Babolat"|"Head"|"Wilson"|"YONEX"|"Prince"...}).
-- Expensive items -> mention WELCOME10 coupon (10% off up to \u20B9300) for first-time buyers.
+- COUPONS (STRICT):
+  * For TENNIS BALLS / PICKLEBALL BALLS / PADEL BALLS -> suggest coupon code "BALLS3" (NOT WELCOME10).
+  * For first-time buyers on everything else -> suggest "WELCOME10" (10% off up to \u20B9300).
+  * Never mix these up. If the cart / recommendation is balls, it is always BALLS3.
 - Cross-sell: racquet -> suggest strings/bags/shoes.
+- USED RACQUETS: When a customer asks about used / second-hand / pre-owned racquets, direct them to https://tennisoutlet.in/used-racquets AND also call get_products_by_category(90) to list current stock.
+- PINCODE / DELIVERY DATE: If the customer asks when their delivery will arrive, asks for a delivery date, or shares a pincode, reply with: "Please enter your pincode on the product page to see the exact delivery date for that item." Do NOT attempt to predict delivery dates yourself.
 
 SIZE / SIZE-SPECIFIC REQUESTS (IMPORTANT):
 - Shoe sizes (UK/US/EU) and apparel sizes are selected on the product page - they are NOT in product names.
@@ -132,7 +139,12 @@ COMMUNICATION:
 BOUNDARIES:
 - No competitor discussion, no medical/injury advice, no payment processing.
 - Stay strictly within TennisOutlet / PickleballOutlet / PadelOutlet scope.
-- We do NOT carry New Balance - recommend alternatives.
+- BRANDS WE DO NOT CARRY: New Balance, Adidas tennis, Puma tennis. If a customer asks for these, respond: "We don't currently stock that brand. Here are comparable options from brands we carry:" then call list_brands or recommend from Babolat / Wilson / Head / Yonex / ASICS / Prince / Nike as appropriate.
+
+BUSINESS HOURS & ESCALATION:
+- Store / Operator hours: 10:00 AM - 6:00 PM IST, Monday to Saturday. Closed Sunday and national holidays.
+- During business hours you can say "I'm connecting you with our support team" when needed.
+- Outside business hours or on closed days, if a customer needs a human, respond: "Our team is available 10 AM - 6 PM IST, Monday to Saturday. I've noted your query and a team member will follow up during business hours. For urgent help, please call +91 9502517700 during those hours."
 
 Use ${MAGENTO_STORE_URL} as the store origin for all product links.`;
 
@@ -149,6 +161,21 @@ const FUNCTION_DEFINITIONS = [
           order_id: { type: "string", description: "Customer's order ID (e.g., '400020695' or '#400020695')" }
         },
         required: ["order_id"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_recent_orders",
+      description: "Look up the customer's most recent orders by email (default last 3). Use when the customer provides their email and asks for order history or 'my recent orders'. Returns order_id, status, status_label, created_at. Never expose amount / payment / address / item details.",
+      parameters: {
+        type: "object",
+        properties: {
+          email: { type: "string", description: "Customer's registered email address." },
+          limit: { type: "integer", description: "How many recent orders to return (default 3, max 10).", default: 3 }
+        },
+        required: ["email"]
       }
     }
   },
@@ -482,18 +509,11 @@ async function oauthGet(endpoint, params = {}) {
 
 // ==================== ORDER STATUS ====================
 function getStatusLabel(status) {
-  const labels = {
-    pending: 'Order Received - Awaiting Processing',
-    pending_payment: 'Awaiting Payment Confirmation',
-    processing: 'Order is Being Processed',
-    complete: 'Order Delivered Successfully',
-    shipped: 'Order Has Been Shipped',
-    canceled: 'Order Has Been Cancelled',
-    closed: 'Order Closed',
-    holded: 'Order On Hold',
-    payment_review: 'Payment Under Review'
-  };
-  return labels[status] || status;
+  // v4.2: pass Magento's native status through, just title-cased.
+  // Vinay asked for raw Magento labels (e.g. "Delivered" not "Order Delivered Successfully").
+  if (!status) return 'Unknown';
+  const s = String(status).replace(/_/g, ' ').trim();
+  return s.replace(/\b\w/g, c => c.toUpperCase());
 }
 
 async function getOrderStatus(orderId) {
@@ -531,11 +551,17 @@ async function getOrderStatus(orderId) {
       };
       const ship = await oauthGet('/shipments', shipParams);
       (ship.items || []).forEach(s => (s.tracks || []).forEach(t => {
-        tracking.push({
-          carrier: t.title || t.carrier_code || 'Blue Dart',
-          tracking_number: t.track_number,
-          tracking_url: t.track_number ? `https://bluedart.com/?${t.track_number}` : null
-        });
+        const carrierRaw = (t.title || t.carrier_code || '').toString();
+        const awb = t.track_number;
+        const isDelhivery = /delh?ivery/i.test(carrierRaw);
+        const carrier = isDelhivery ? 'Delhivery' : 'Blue Dart';
+        let tracking_url = null;
+        if (awb) {
+          tracking_url = isDelhivery
+            ? `https://www.delhivery.com/track-v2/package/${awb}`
+            : `https://bluedart.com/?${awb}`;
+        }
+        tracking.push({ carrier, tracking_number: awb, tracking_url });
       }));
     } catch (e) { console.log('shipments fetch failed:', e.response?.status); }
 
@@ -558,6 +584,33 @@ async function getOrderStatus(orderId) {
   } catch (error) {
     console.error('getOrderStatus error:', error.response?.status, error.response?.data?.message || error.message);
     return { error: true, message: `Could not fetch order ${orderId}. Please verify the number or contact support at +91 9502517700.` };
+  }
+}
+
+// ==================== RECENT ORDERS BY EMAIL (v4.2) ====================
+async function listRecentOrders({ email, limit = 3 } = {}) {
+  if (!email) return { error: true, message: 'Email is required to look up orders.' };
+  try {
+    const params = {
+      'searchCriteria[filter_groups][0][filters][0][field]': 'customer_email',
+      'searchCriteria[filter_groups][0][filters][0][value]': email,
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'eq',
+      'searchCriteria[sortOrders][0][field]': 'created_at',
+      'searchCriteria[sortOrders][0][direction]': 'DESC',
+      'searchCriteria[pageSize]': Math.min(Math.max(limit, 1), 10)
+    };
+    const res = await oauthGet('/orders', params);
+    const orders = (res.items || []).map(o => ({
+      order_id: o.increment_id,
+      status: o.status,
+      status_label: getStatusLabel(o.status),
+      created_at: o.created_at,
+      item_count: (o.items || []).reduce((n, it) => n + (it.qty_ordered ? 1 : 0), 0)
+    }));
+    return { email, count: orders.length, orders };
+  } catch (error) {
+    console.error('listRecentOrders error:', error.response?.status, error.message);
+    return { error: true, message: `Could not fetch orders for ${email}. Please verify and try again.` };
   }
 }
 
@@ -1134,6 +1187,7 @@ async function getProductReviews({ sku = null, query = null, page_size = 5 } = {
 async function executeFunction(name, args) {
   switch (name) {
     case 'get_order_status': return await getOrderStatus(args.order_id);
+    case 'list_recent_orders': return await listRecentOrders(args || {});
     case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size, { min_price: args.min_price, max_price: args.max_price });
     case 'search_products': return await searchProducts(args.query, args.page_size, { min_price: args.min_price, max_price: args.max_price });
     case 'get_shoes_with_specs': return await getShoesWithSpecs(args || {});
