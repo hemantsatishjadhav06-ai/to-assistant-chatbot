@@ -5,6 +5,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const { masterHandle } = require('./agents');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,8 +26,11 @@ app.use('/api/', limiter);
 // ==================== CONFIG ====================
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-4o';
-const MAGENTO_BASE_URL = process.env.MAGENTO_BASE_URL || 'https://console.tennisoutlet.in';
-const MAGENTO_REST = `${MAGENTO_BASE_URL}/rest/V1`;
+const MAGENTO_BASE_URL_RAW = process.env.MAGENTO_BASE_URL || 'https://console.tennisoutlet.in';
+// Normalize: strip trailing slash, strip existing /rest/V1 if env already included it
+const MAGENTO_ROOT = MAGENTO_BASE_URL_RAW.replace(/\/+$/, '').replace(/\/rest\/V1$/i, '');
+const MAGENTO_BASE_URL = MAGENTO_ROOT;
+const MAGENTO_REST = `${MAGENTO_ROOT}/rest/V1`;
 const MAGENTO_TOKEN = process.env.MAGENTO_TOKEN;
 const MAGENTO_STORE_URL = process.env.MAGENTO_STORE_URL || 'https://tennisoutlet.in';
 
@@ -86,10 +90,20 @@ PRODUCT PRESENTATION RULES (VERY IMPORTANT):
 - The tool returns products sorted highest-qty first. Feature the FIRST product prominently as the recommended upsell pick.
 - After the list, add a short comparative insight (beginner vs. intermediate, power vs. control, etc.).
 
+ROUTING RULES (STRICT - follow these exactly):
+- ANY query about RACQUETS / RACKETS / PADDLES (including "which racquet", "best racquet", "recommend a racquet", "beginner racquet", brand-specific racquets) -> MUST call get_racquets_with_specs. NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434) for racquet queries - those categories include balls and accessories.
+- ANY query about SHOES / FOOTWEAR -> MUST call get_shoes_with_specs (never get_products_by_category for shoes).
+- ANY query about BRANDS carried by the store -> call list_brands.
+- BALLS -> get_products_by_category (Tennis Balls=31, Pickleball Balls=252, Padel Balls=273).
+- STRINGS -> get_products_by_category (29).
+- BAGS -> get_products_by_category (115).
+- ACCESSORIES -> get_products_by_category (37).
+- USED racquets -> get_products_by_category (90).
+- Sale/Wimbledon/Grand Slam offers -> get_products_by_category (292/349/437).
+
 SMART GUIDELINES:
-- "best racquets" / "best sellers" -> category_id 434 (2025) or 338 (2024).
-- Beginner -> category_id 87 and add beginner advice (lighter, larger head size, forgiving).
-- Brand questions -> brand-specific category (Babolat 26, Wilson 34, Head 35, Yonex 66, Prince 336).
+- Beginner racquet -> get_racquets_with_specs({skill_level:"beginner"}) + add beginner advice (lighter, larger head size, forgiving).
+- Brand-specific racquet -> get_racquets_with_specs({brand:"Babolat"|"Head"|"Wilson"|"YONEX"|"Prince"...}).
 - Expensive items -> mention WELCOME10 coupon (10% off up to \u20B9300) for first-time buyers.
 - Cross-sell: racquet -> suggest strings/bags/shoes.
 
@@ -157,6 +171,49 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
   {
     type: "function",
     function: {
+      name: "get_shoes_with_specs",
+      description: "Return shoes from TennisOutlet with FULL resolved specs (brand, court_type, width, cushioning, shoe_type, shoe_weight, inner/outer material, outsole, made_in_country, available UK/INDIA sizes). Use this for ANY shoe query about brand, size availability, or spec filtering. Accepts optional filters.",
+      parameters: {
+        type: "object",
+        properties: {
+          sport: { type: "string", enum: ["tennis", "pickleball", "padel"], default: "tennis" },
+          brand: { type: "string", description: "Brand name like 'ASICS', 'Nike', 'Babolat', 'Adidas'. Optional." },
+          shoe_type: { type: "string", description: "Men's / Women's / Kid's. Optional." },
+          court_type: { type: "string", description: "All Court / Clay Court / Hard Court / Padel Court / Pickleball Court. Optional." },
+          width: { type: "string", description: "Narrow / Medium / Wide. Optional." },
+          cushioning: { type: "string", description: "Low / Medium / High. Optional." },
+          page_size: { type: "integer", default: 10 }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_racquets_with_specs",
+      description: "Return RACQUETS (not balls, not accessories) from the correct racquet category with brand resolved. ALWAYS use this for any query about racquets/rackets/paddles - NEVER use get_products_by_category for racquet queries. Tennis Racquets category=25, Padel Rackets=272, Pickleball Paddles=250. Optionally filter by brand and skill_level.",
+      parameters: {
+        type: "object",
+        properties: {
+          sport: { type: "string", enum: ["tennis", "padel", "pickleball"], default: "tennis" },
+          brand: { type: "string", description: "Brand name like Babolat, Head, Wilson, YONEX, Prince. Optional." },
+          skill_level: { type: "string", enum: ["beginner", "intermediate", "advanced", "senior", "junior"], description: "Optional skill level filter." },
+          page_size: { type: "integer", default: 10 }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_brands",
+      description: "List every brand carried by TennisOutlet.in with its internal brand id. Use when the customer asks 'which brands do you carry?' or to discover the exact spelling before filtering.",
+      parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "search_products",
       description: "Search the full TennisOutlet.in catalog by name/keyword. Returns only available (qty>=1) items, sorted highest-qty first for upsell.",
       parameters: {
@@ -195,6 +252,55 @@ function extractCustomAttrs(item) {
   const attrs = {};
   (item.custom_attributes || []).forEach(a => { attrs[a.attribute_code] = a.value; });
   return attrs;
+}
+
+// ==================== ATTRIBUTE OPTION CACHE ====================
+// Maps attribute_code -> { optionValue: label }. Resolves IDs like 5452 -> "ASICS".
+const ATTR_OPTIONS = {};
+const ATTRS_TO_CACHE = ['brands', 'court_type', 'width', 'cushioning', 'shoe_type', 'shoe_size', 'color'];
+
+async function loadAttributeOptions() {
+  for (const code of ATTRS_TO_CACHE) {
+    try {
+      const res = await axios.get(`${MAGENTO_REST}/products/attributes/${code}/options`, {
+        headers: { 'Authorization': `Bearer ${MAGENTO_TOKEN}`, 'Accept': 'application/json' },
+        timeout: 15000
+      });
+      const map = {};
+      (res.data || []).forEach(o => {
+        if (o.value != null && String(o.value).trim() !== '') map[String(o.value)] = o.label;
+      });
+      ATTR_OPTIONS[code] = map;
+      console.log(`[attr-cache] ${code}: ${Object.keys(map).length} options`);
+    } catch (e) {
+      console.log(`[attr-cache] ${code} failed:`, e.response?.status || e.message);
+      ATTR_OPTIONS[code] = {};
+    }
+  }
+}
+
+function resolveAttr(code, value) {
+  if (value == null || value === '') return null;
+  const map = ATTR_OPTIONS[code];
+  if (!map) return value;
+  const vals = String(value).split(',').map(v => v.trim()).filter(Boolean);
+  const labels = vals.map(v => map[v] || v);
+  return labels.length === 1 ? labels[0] : labels;
+}
+
+// Reverse-lookup: brand name -> option id (case-insensitive, fuzzy)
+function brandNameToId(name) {
+  if (!name) return null;
+  const map = ATTR_OPTIONS['brands'] || {};
+  const target = String(name).trim().toLowerCase();
+  for (const [id, label] of Object.entries(map)) {
+    if (String(label).trim().toLowerCase() === target) return id;
+  }
+  // fuzzy contains
+  for (const [id, label] of Object.entries(map)) {
+    if (String(label).toLowerCase().includes(target)) return id;
+  }
+  return null;
 }
 
 // ==================== MAGENTO BEARER API (catalog) ====================
@@ -365,16 +471,41 @@ async function fetchStockMap(skus) {
 
 function shapeProduct(item, qty) {
   const attrs = extractCustomAttrs(item);
-  return {
+  const brandLabel = attrs.brands ? resolveAttr('brands', attrs.brands) : (attrs.brand || null);
+  const shaped = {
     name: item.name,
     sku: item.sku,
     price: parseFloat(item.price || 0) || null,
     special_price: attrs.special_price ? parseFloat(attrs.special_price) : null,
-    brand: attrs.brand || null,
+    brand: brandLabel,
     short_description: attrs.short_description ? String(attrs.short_description).replace(/<[^>]*>/g, '').substring(0, 200) : null,
     product_url: buildProductUrl(attrs.url_key, item.name, item.sku),
+    image: attrs.image ? `${MAGENTO_STORE_URL}/media/catalog/product${attrs.image}` : null,
     qty
   };
+  // Shoe-specific specs, resolved where possible
+  const shoeSpecs = {};
+  if (attrs.court_type) shoeSpecs.court_type = resolveAttr('court_type', attrs.court_type);
+  if (attrs.width) shoeSpecs.width = resolveAttr('width', attrs.width);
+  if (attrs.cushioning) shoeSpecs.cushioning = resolveAttr('cushioning', attrs.cushioning);
+  if (attrs.shoe_type) shoeSpecs.shoe_type = resolveAttr('shoe_type', attrs.shoe_type);
+  if (attrs.shoe_weight) shoeSpecs.shoe_weight = attrs.shoe_weight;
+  if (attrs.inner_material) shoeSpecs.inner_material = attrs.inner_material;
+  if (attrs.outer_material) shoeSpecs.outer_material = attrs.outer_material;
+  if (attrs.outsole) shoeSpecs.outsole = attrs.outsole;
+  if (attrs.made_in_country) shoeSpecs.made_in_country = attrs.made_in_country;
+  if (attrs.ean) shoeSpecs.ean = attrs.ean;
+  if (attrs.article_code) shoeSpecs.article_code = attrs.article_code;
+  // Configurable size options
+  const sizeOpt = (item.extension_attributes?.configurable_product_options || [])
+    .find(o => String(o.attribute_id) === '204' || /size/i.test(o.label || ''));
+  if (sizeOpt) {
+    shoeSpecs.available_sizes = (sizeOpt.values || [])
+      .map(v => resolveAttr('shoe_size', v.value_index))
+      .filter(Boolean);
+  }
+  if (Object.keys(shoeSpecs).length) shaped.specs = shoeSpecs;
+  return shaped;
 }
 
 async function getProductsByCategory(categoryId, pageSize = 10) {
@@ -440,12 +571,129 @@ async function searchProducts(query, pageSize = 10) {
   }
 }
 
+// ==================== SHOES WITH SPECS (ALL-IN-ONE) ====================
+// Categories: Tennis Shoes=24, Pickleball Shoes=253, Padel Shoes=274
+const SHOE_CATEGORIES = { tennis: 24, pickleball: 253, padel: 274 };
+
+async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = null, court_type = null, width = null, cushioning = null, page_size = 10 } = {}) {
+  try {
+    const catId = SHOE_CATEGORIES[String(sport).toLowerCase()] || 24;
+    const filters = [];
+    let idx = 0;
+    filters.push({ group: idx++, field: 'category_id', value: catId });
+    filters.push({ group: idx++, field: 'status', value: 1 });
+    filters.push({ group: idx++, field: 'visibility', value: 4 });
+
+    if (brand) {
+      const bid = brandNameToId(brand);
+      if (bid) filters.push({ group: idx++, field: 'brands', value: bid });
+    }
+    const specMap = { shoe_type, court_type, width, cushioning };
+    for (const [code, val] of Object.entries(specMap)) {
+      if (!val) continue;
+      const optMap = ATTR_OPTIONS[code] || {};
+      // find matching option id
+      const match = Object.entries(optMap).find(([, label]) => String(label).toLowerCase() === String(val).toLowerCase())
+                 || Object.entries(optMap).find(([, label]) => String(label).toLowerCase().includes(String(val).toLowerCase()));
+      if (match) filters.push({ group: idx++, field: code, value: match[0] });
+    }
+
+    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 4, 100) };
+    filters.forEach(f => {
+      params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
+      params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
+    });
+
+    const result = await magentoGet('/products', params);
+    if (!result.items || result.items.length === 0) {
+      return { products: [], total: 0, message: `No ${sport} shoes matched those filters.` };
+    }
+    const skus = result.items.map(i => i.sku);
+    const stockMap = await fetchStockMap(skus);
+    const allZero = Object.values(stockMap).every(v => !v);
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+    const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
+      .sort((a, b) => b.qty - a.qty)
+      .slice(0, Math.min(page_size, 20));
+    return {
+      sport, filters_applied: { brand, shoe_type, court_type, width, cushioning },
+      products: available, total: result.total_count, showing: available.length
+    };
+  } catch (error) {
+    console.error('getShoesWithSpecs error:', error.response?.status, error.message);
+    return { error: true, message: `Unable to fetch ${sport} shoes. ${error.message}` };
+  }
+}
+
+// ==================== RACQUETS WITH SPECS ====================
+// Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250
+const RACQUET_CATEGORIES = { tennis: 25, padel: 272, pickleball: 250 };
+
+async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_level = null, page_size = 10 } = {}) {
+  try {
+    const catId = RACQUET_CATEGORIES[String(sport).toLowerCase()] || 25;
+    const filters = [];
+    let idx = 0;
+    filters.push({ group: idx++, field: 'category_id', value: catId });
+    filters.push({ group: idx++, field: 'status', value: 1 });
+    filters.push({ group: idx++, field: 'visibility', value: 4 });
+    // CRITICAL: exclude grip-size child variants; only return parent products
+    filters.push({ group: idx++, field: 'type_id', value: 'configurable' });
+
+    if (brand) {
+      const bid = brandNameToId(brand);
+      if (bid) filters.push({ group: idx++, field: 'brands', value: bid });
+    }
+    // Skill-level mapping to Magento categories (intersect via multiple category filters)
+    const SKILL_CATS = { beginner: 87, intermediate: 80, advanced: 79, senior: 88, junior: 81 };
+    if (skill_level && SKILL_CATS[String(skill_level).toLowerCase()]) {
+      filters.push({ group: idx++, field: 'category_id', value: SKILL_CATS[String(skill_level).toLowerCase()] });
+    }
+
+    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 4, 100) };
+    filters.forEach(f => {
+      params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
+      params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
+    });
+    params['searchCriteria[sortOrders][0][field]'] = 'created_at';
+    params['searchCriteria[sortOrders][0][direction]'] = 'DESC';
+
+    const result = await magentoGet('/products', params);
+    if (!result.items || result.items.length === 0) {
+      return { products: [], total: 0, message: `No ${sport} racquets matched those filters.` };
+    }
+    const skus = result.items.map(i => i.sku);
+    const stockMap = await fetchStockMap(skus);
+    const allZero = Object.values(stockMap).every(v => !v);
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+    const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
+      .sort((a, b) => b.qty - a.qty)
+      .slice(0, Math.min(page_size, 20));
+    return {
+      sport, filters_applied: { brand, skill_level },
+      products: available, total: result.total_count, showing: available.length
+    };
+  } catch (error) {
+    console.error('getRacquetsWithSpecs error:', error.response?.status, error.message);
+    return { error: true, message: `Unable to fetch ${sport} racquets. ${error.message}` };
+  }
+}
+
+function listBrands() {
+  const map = ATTR_OPTIONS['brands'] || {};
+  const brands = Object.entries(map).map(([id, label]) => ({ id, name: label })).filter(b => b.name && b.name.trim());
+  return { total: brands.length, brands };
+}
+
 // ==================== EXECUTE ====================
 async function executeFunction(name, args) {
   switch (name) {
     case 'get_order_status': return await getOrderStatus(args.order_id);
     case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size);
     case 'search_products': return await searchProducts(args.query, args.page_size);
+    case 'get_shoes_with_specs': return await getShoesWithSpecs(args || {});
+    case 'get_racquets_with_specs': return await getRacquetsWithSpecs(args || {});
+    case 'list_brands': return listBrands();
     default: return { error: true, message: `Unknown function: ${name}` };
   }
 }
@@ -557,6 +805,25 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
+// ==================== MULTI-AGENT CHAT ====================
+app.post('/api/chat-agents', async (req, res) => {
+  try {
+    const { messages } = req.body;
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Messages array is required' });
+    }
+    const result = await masterHandle({
+      userMessages: messages,
+      allTools: FUNCTION_DEFINITIONS,
+      executeFunction
+    });
+    res.json(result);
+  } catch (error) {
+    console.error('Multi-agent error:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
 // ==================== HEALTH ====================
 app.get('/api/health', async (req, res) => {
   let magentoStatus = 'unknown';
@@ -583,9 +850,12 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`\n\u{1F3BE} TO Assistant running on :${PORT}`);
   console.log(`\u{1F916} Model: ${OPENROUTER_MODEL}`);
   console.log(`\u{1F517} Magento: ${MAGENTO_REST}`);
-  console.log(`\u{1F510} OAuth configured: ${!!OAUTH_CONSUMER_KEY}\n`);
+  console.log(`\u{1F510} OAuth configured: ${!!OAUTH_CONSUMER_KEY}`);
+  console.log(`[startup] Loading Magento attribute options...`);
+  await loadAttributeOptions();
+  console.log(`[startup] Attribute cache ready.\n`);
 });
