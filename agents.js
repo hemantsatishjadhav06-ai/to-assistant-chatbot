@@ -40,7 +40,8 @@ Intents:
 - "greeting"     -> pure greeting ("hi", "hello", "hey", "good morning") with no question attached
 - "other"        -> out of scope (weather, news, math, coding, jokes, anything unrelated to tennis/padel/pickleball shop)
 
-Default sport = "tennis" unless pickleball/padel is clearly mentioned.`;
+Default sport = "tennis" unless pickleball/padel is clearly mentioned.
+SPELLING VARIANTS: "paddle" / "paddel" / "padle" / "pedal" racquet/racket -> sport:"padel" (NOT pickleball, unless the user explicitly wrote "pickleball"). "pickle" / "pikel" / "pickel" -> sport:"pickleball".`;
 
 async function routeIntent(userText) {
   try {
@@ -92,6 +93,8 @@ ${COMMON_RULES}`,
 - KEYWORD_FALLBACK_USED: if the tool response has keyword_fallback_used:true, that means the exact model you asked for wasn't found so the server returned the full brand lineup instead. Acknowledge this honestly: "I couldn't find an exact {keyword} listing in our current stock — here are the {brand} racquets available right now:" then list them. NEVER say "technical difficulties" or "issue retrieving" when products are present in the response — those phrases are reserved for error:true responses only.
 - ERROR HANDLING: only say "experiencing an issue" / "please try again later" if the tool returns {error:true}. If products.length > 0, ALWAYS show the products and never apologise for a retrieval failure.
 - TERMINOLOGY: "pickleball bat" / "pickleball paddle" / "pickleball racket" all mean the same thing — call with sport:"pickleball". Same for "padel bat" -> sport:"padel". Never reply "we don't have pickleball paddles" without first calling the tool with sport:"pickleball".
+- SPELLING VARIANTS: users frequently type "paddle racquet", "paddel", "padle", "pedal" when they mean PADEL. Any of those spellings -> sport:"padel". "pickle" / "pickel" / "pikel" -> sport:"pickleball". When in doubt between padel and pickleball, prefer padel (it's the more common mis-spelling of the two).
+- SUCCESS PATH: when products.length > 0, you MUST list them. Never say "issue retrieving" or "technical difficulty" when the tool returned products. Those phrases are ONLY for {error:true} responses.
 - PRICE FILTERS: parse any price cap/floor in the user's message into numbers and pass them.
   - "under 5K" / "below 5k" / "less than 5000" / "upto 5k" / "<5k" -> max_price: 5000
   - "5K" = 5000. "1L" or "1 lakh" = 100000.
@@ -130,7 +133,13 @@ ${COMMON_RULES}`,
 - BALL MACHINE / BALL THROWER / BALL CANNON / BALL LAUNCHER / BALL FEEDER queries: you MUST call get_ball_machines (NOT search_products, NOT get_products_by_category). This tool unions category + search + slug results so you get every ball-machine SKU with its product URL.
 - For unknown or unusual product types: call find_categories({keyword}) to discover the exact category ID, then call get_products_by_category with that id.
 - Prefer search_products for free-text queries that don't fit the above.
-- Use get_products_by_category with these IDs: Tennis Balls=31, Pickleball Balls=252, Padel Balls=273, Strings=29, Bags=115, Accessories=37, Used Racquets=90, Wimbledon Sale=292, Grand Slam=349, Boxing Day=437.
+- Use get_products_by_category with these IDs (SPORT-AWARE — always pick the category that matches the sport mentioned):
+  * TENNIS: Balls=31, Strings=29, Bags=115, Accessories=37, Used Racquets=90
+  * PADEL (from Padel Outlet tree): Balls=273, Shoes=274, Bags=275, Rackets=272 (but racket queries should go to get_racquets_with_specs with sport:"padel", not here)
+  * PICKLEBALL (from Pickle Ball Outlet tree): Balls=252, Shoes=253, Bags=254, Paddles=250 (but paddle queries should go to get_racquets_with_specs with sport:"pickleball")
+  * SALE / SEASONAL: Wimbledon Sale=292, Grand Slam=349, Boxing Day=437
+- CRITICAL: "padel bag" -> 275, NOT 115. "pickleball bag" -> 254, NOT 115. "padel ball" -> 273. "pickleball ball" -> 252. Never default to the tennis category when the user explicitly names another sport.
+- If the user asks for a sport+category combo not listed above (e.g. "padel grips"), call find_categories({keyword:"padel grips"}) first to discover the right id, then get_products_by_category.
 - PRICE FILTERS: parse price caps/floors into numbers and pass min_price / max_price.
   - "under 500" -> max_price: 500. "below 2K" -> max_price: 2000. "1L" = 100000.
   - "above 1k" / "over 1000" -> min_price: 1000
