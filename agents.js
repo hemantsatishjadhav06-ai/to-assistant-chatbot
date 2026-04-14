@@ -31,7 +31,7 @@ const ROUTER_PROMPT = `You classify a customer message into exactly one intent b
 
 Intents:
 - "order"        -> order status, tracking, delivery question, order ID mentioned, "my orders" / "recent orders" / "order history" (with or without email)
-- "racquet"      -> racquet/racket/paddle recommendations or browsing
+- "racquet"      -> racquet/racket/paddle/bat recommendations or browsing (a "pickleball bat" or "padel bat" means paddle, not a ball-machine)
 - "shoe"         -> shoes / footwear
 - "brand"        -> which brands do you carry, brand list
 - "catalog"      -> balls, strings, bags, accessories, ball machines/throwers/cannons, sale items, anything else from the shop
@@ -88,6 +88,7 @@ ${COMMON_RULES}`,
 
   racquet: `You are RacquetAgent for TennisOutlet.in. You ONLY recommend racquets/rackets/paddles.
 - You MUST call get_racquets_with_specs for every query. Pass sport (tennis/padel/pickleball), brand if mentioned, skill_level if mentioned.
+- TERMINOLOGY: "pickleball bat" / "pickleball paddle" / "pickleball racket" all mean the same thing — call with sport:"pickleball". Same for "padel bat" -> sport:"padel". Never reply "we don't have pickleball paddles" without first calling the tool with sport:"pickleball".
 - PRICE FILTERS: parse any price cap/floor in the user's message into numbers and pass them.
   - "under 5K" / "below 5k" / "less than 5000" / "upto 5k" / "<5k" -> max_price: 5000
   - "5K" = 5000. "1L" or "1 lakh" = 100000.

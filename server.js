@@ -702,21 +702,47 @@ function shapeProduct(item, qty) {
   return shaped;
 }
 
+// Fetches every product that matches the given filters, paginating across
+// Magento pages up to maxItems. Used by discovery tools so the client-side
+// size/price filters see the full catalog, not just the first 40-100 rows.
+async function fetchProductsPaginated(filters, { maxItems = 300, sortField = 'created_at', sortDir = 'DESC' } = {}) {
+  const items = [];
+  const perPage = 100;
+  const maxPages = Math.max(1, Math.ceil(maxItems / perPage));
+  let total = 0;
+  for (let page = 1; page <= maxPages; page++) {
+    const params = {
+      'searchCriteria[pageSize]': perPage,
+      'searchCriteria[currentPage]': page
+    };
+    filters.forEach(f => {
+      params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
+      params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
+      if (f.condition_type) params[`searchCriteria[filter_groups][${f.group}][filters][0][condition_type]`] = f.condition_type;
+    });
+    if (sortField) {
+      params['searchCriteria[sortOrders][0][field]'] = sortField;
+      params['searchCriteria[sortOrders][0][direction]'] = sortDir;
+    }
+    const result = await magentoGet('/products', params);
+    const batch = result.items || [];
+    total = result.total_count || batch.length;
+    items.push(...batch);
+    if (batch.length < perPage) break;
+    if (items.length >= maxItems) break;
+    if (items.length >= total) break;
+  }
+  return { items: items.slice(0, maxItems), total_count: total };
+}
+
 async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, offset = 0, exclude_skus = [] } = {}) {
   try {
-    const fetchSize = Math.max((pageSize + offset) * 3, 30);
-    const params = {
-      'searchCriteria[filter_groups][0][filters][0][field]': 'category_id',
-      'searchCriteria[filter_groups][0][filters][0][value]': categoryId,
-      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
-      'searchCriteria[filter_groups][1][filters][0][value]': 1,
-      'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
-      'searchCriteria[filter_groups][2][filters][0][value]': 4,
-      'searchCriteria[pageSize]': Math.min(fetchSize, 100),
-      'searchCriteria[sortOrders][0][field]': 'created_at',
-      'searchCriteria[sortOrders][0][direction]': 'DESC'
-    };
-    const result = await magentoGet('/products', params);
+    const filters = [
+      { group: 0, field: 'category_id', value: categoryId },
+      { group: 1, field: 'status', value: 1 },
+      { group: 2, field: 'visibility', value: 4 }
+    ];
+    const result = await fetchProductsPaginated(filters, { maxItems: 300 });
     if (!result.items || result.items.length === 0) {
       return { products: [], total: 0, message: "No products found in this category." };
     }
@@ -872,15 +898,10 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       if (match) filters.push({ group: idx++, field: code, value: match[0] });
     }
 
-    // Wider fetch so pagination has runway across category. Magento cap 100/page.
-    const fetchPageSize = Math.min(Math.max((page_size + offset) * 4, 40), 100);
-    const params = { 'searchCriteria[pageSize]': fetchPageSize };
-    filters.forEach(f => {
-      params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
-      params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
-    });
-
-    const result = await magentoGet('/products', params);
+    // Fetch the WHOLE category (up to 300) so client-side size/price filters
+    // see every shoe, not just the first page. Size attribute can't be pushed
+    // down to Magento (it lives on child SKUs), so we need the full pool.
+    const result = await fetchProductsPaginated(filters, { maxItems: 300 });
     if (!result.items || result.items.length === 0) {
       return { products: [], total: 0, message: `No ${sport} shoes matched those filters.`, has_more: false, offset, next_offset: offset };
     }
@@ -966,15 +987,8 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
       filters.push({ group: idx++, field: 'category_id', value: SKILL_CATS[String(skill_level).toLowerCase()] });
     }
 
-    const params = { 'searchCriteria[pageSize]': Math.min(Math.max((page_size + offset) * 4, 40), 100) };
-    filters.forEach(f => {
-      params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
-      params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
-    });
-    params['searchCriteria[sortOrders][0][field]'] = 'created_at';
-    params['searchCriteria[sortOrders][0][direction]'] = 'DESC';
-
-    const result = await magentoGet('/products', params);
+    // Fetch the entire racquet/paddle pool in one go (up to 300 across pages).
+    const result = await fetchProductsPaginated(filters, { maxItems: 300 });
     if (!result.items || result.items.length === 0) {
       return { products: [], total: 0, message: `No ${sport} racquets matched those filters.` };
     }
