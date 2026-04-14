@@ -458,13 +458,40 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'Messages array is required' });
     }
 
-    const apiMessages = [{ role: 'system', content: SYSTEM_PROMPT }, ...messages];
+    // Detect size-specific shoe/apparel queries and inject a strong directive + force a tool call
+    const lastUser = [...messages].reverse().find(m => m.role === 'user')?.content || '';
+    const lowerUser = lastUser.toLowerCase();
+    const mentionsSize = /\b(size|sz)\s*\d+|\bsize\b|\buk\s*\d+|\bus\s*\d+|\beu\s*\d+/i.test(lastUser);
+    const mentionsShoe = /shoe|footwear|sneaker/i.test(lowerUser);
+    const mentionsPickle = /pickleball|pickle/i.test(lowerUser);
+    const mentionsPadel = /padel/i.test(lowerUser);
+
+    let forceToolChoice = 'auto';
+    let sizeDirective = null;
+    if (mentionsSize && mentionsShoe) {
+      const catId = mentionsPickle ? 253 : mentionsPadel ? 274 : 24;
+      const sport = mentionsPickle ? 'pickleball' : mentionsPadel ? 'padel' : 'tennis';
+      sizeDirective = {
+        role: 'system',
+        content: `SIZE QUERY DETECTED: The customer asked about ${sport} shoes with a specific size. You MUST immediately call get_products_by_category with category_id=${catId} and page_size=5. After listing the products, append: "All sizes (including the size you mentioned) can be selected on each product page. If a specific size is sold out, it will be marked on that page." NEVER say "we don't have that size".`
+      };
+      forceToolChoice = { type: 'function', function: { name: 'get_products_by_category' } };
+    } else if (mentionsSize && /racquet|racket|grip/i.test(lowerUser)) {
+      sizeDirective = {
+        role: 'system',
+        content: `GRIP SIZE QUERY: Call get_products_by_category (category_id 25 for tennis racquets) or search_products, then tell the user grip size is selected on the product page.`
+      };
+    }
+
+    const apiMessages = sizeDirective
+      ? [{ role: 'system', content: SYSTEM_PROMPT }, sizeDirective, ...messages]
+      : [{ role: 'system', content: SYSTEM_PROMPT }, ...messages];
 
     let response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
       model: OPENROUTER_MODEL,
       messages: apiMessages,
       tools: FUNCTION_DEFINITIONS,
-      tool_choice: 'auto',
+      tool_choice: forceToolChoice,
       temperature: 0.7,
       max_tokens: 1800
     }, {
