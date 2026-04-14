@@ -240,6 +240,7 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
         properties: {
           sport: { type: "string", enum: ["tennis", "padel", "pickleball"], default: "tennis" },
           brand: { type: "string", description: "Brand name like Babolat, Head, Wilson, YONEX, Prince. Optional." },
+          keyword: { type: "string", description: "Optional model / line name to substring-match product names. Use for queries like 'Head Boom' -> brand:'Head', keyword:'boom'; 'Pure Drive' -> keyword:'pure drive'; 'Pro Staff 97' -> keyword:'pro staff 97'." },
           skill_level: { type: "string", enum: ["beginner", "intermediate", "advanced", "senior", "junior"], description: "Optional skill level filter." },
           min_price: { type: "number", description: "Optional minimum price in INR." },
           max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand before calling: '5K'->5000." },
@@ -989,7 +990,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
 // Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250
 const RACQUET_CATEGORIES = { tennis: 25, padel: 272, pickleball: 250 };
 
-async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_level = null, min_price = null, max_price = null, page_size = 10, offset = 0, exclude_skus = [] } = {}) {
+async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, keyword = null, skill_level = null, min_price = null, max_price = null, page_size = 10, offset = 0, exclude_skus = [] } = {}) {
   try {
     const catId = RACQUET_CATEGORIES[String(sport).toLowerCase()] || 25;
     const filters = [];
@@ -1024,6 +1025,17 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     let pool = inStock.length ? inStock : (allZero ? shaped : []);
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
+    // v4.2.7: keyword substring match (model / line name) — case-insensitive,
+    // checks name AND sku. "Head Boom" -> brand:Head + keyword:"boom".
+    if (keyword) {
+      const kw = String(keyword).toLowerCase().trim();
+      if (kw) {
+        pool = pool.filter(p =>
+          String(p.name || '').toLowerCase().includes(kw) ||
+          String(p.sku || '').toLowerCase().includes(kw)
+        );
+      }
+    }
     const filtered_out = beforeCustomer - pool.length;
     pool.sort((a, b) => b.qty - a.qty);
     const excludeSet = new Set((Array.isArray(exclude_skus) ? exclude_skus : []).map(String));
@@ -1035,12 +1047,13 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     let message = null;
     if (available.length === 0 && beforeCustomer > 0) {
       const bits = [];
+      if (keyword) bits.push(`matching "${keyword}"`);
       if (max_price) bits.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
       if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
       message = `No ${sport} racquets match the requested filters${bits.length ? ` (${bits.join(', ')})` : ''}.`;
     }
     return {
-      sport, filters_applied: { brand, skill_level, min_price, max_price },
+      sport, filters_applied: { brand, keyword, skill_level, min_price, max_price },
       products: available, total: result.total_count, showing: available.length,
       offset, next_offset: offset + available.length, has_more, shown_skus,
       pool_size_after_filters: poolFiltered.length, filtered_out, message
