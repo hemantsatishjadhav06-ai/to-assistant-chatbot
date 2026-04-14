@@ -563,22 +563,60 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
   }
 }
 
+// Build Magento searchCriteria that ORs LIKE across name + sku + url_key.
+// Magento treats filters inside the SAME filter_group as OR.
+function buildSearchParams(pattern, pageSize) {
+  return {
+    // OR group: name LIKE %pattern% OR sku LIKE %pattern% OR url_key LIKE %pattern%
+    'searchCriteria[filter_groups][0][filters][0][field]': 'name',
+    'searchCriteria[filter_groups][0][filters][0][value]': `%${pattern}%`,
+    'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
+    'searchCriteria[filter_groups][0][filters][1][field]': 'sku',
+    'searchCriteria[filter_groups][0][filters][1][value]': `%${pattern}%`,
+    'searchCriteria[filter_groups][0][filters][1][condition_type]': 'like',
+    'searchCriteria[filter_groups][0][filters][2][field]': 'url_key',
+    'searchCriteria[filter_groups][0][filters][2][value]': `%${pattern}%`,
+    'searchCriteria[filter_groups][0][filters][2][condition_type]': 'like',
+    // AND status=1
+    'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+    'searchCriteria[filter_groups][1][filters][0][value]': 1,
+    'searchCriteria[pageSize]': Math.min(pageSize, 100),
+    'searchCriteria[sortOrders][0][field]': 'name',
+    'searchCriteria[sortOrders][0][direction]': 'ASC'
+  };
+}
+
+const SEARCH_STOPWORDS = new Set([
+  'the','a','an','is','are','do','does','have','has','any','some','me','my','i','you',
+  'please','show','find','get','give','tell','need','want','looking','for','buy','to',
+  'about','of','on','in','under','over','below','above','with','and','or','vs','versus',
+  'review','reviews','rating','ratings','feedback','price','cost','available','stock'
+]);
+
 async function searchProducts(query, pageSize = 10, { min_price = null, max_price = null } = {}) {
   try {
     const fetchSize = Math.max(pageSize * 3, 30);
-    const params = {
-      'searchCriteria[filter_groups][0][filters][0][field]': 'name',
-      'searchCriteria[filter_groups][0][filters][0][value]': `%${query}%`,
-      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
-      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
-      'searchCriteria[filter_groups][1][filters][0][value]': 1,
-      'searchCriteria[pageSize]': Math.min(fetchSize, 100),
-      'searchCriteria[sortOrders][0][field]': 'name',
-      'searchCriteria[sortOrders][0][direction]': 'ASC'
-    };
-    const result = await magentoGet('/products', params);
+    let result = await magentoGet('/products', buildSearchParams(query, fetchSize));
+
+    // Multi-word fallback: if zero hits on the full phrase, try each significant
+    // token individually and union the results. Fixes queries like "tennis ball
+    // machine" that don't substring-match "Ball Machine" on the product.
     if (!result.items || result.items.length === 0) {
-      return { products: [], total: 0, message: `No products found matching "${query}".` };
+      const tokens = String(query).toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(t => t.length >= 3 && !SEARCH_STOPWORDS.has(t));
+      const seen = new Map();
+      for (const tok of tokens) {
+        try {
+          const r2 = await magentoGet('/products', buildSearchParams(tok, fetchSize));
+          for (const it of (r2.items || [])) if (!seen.has(it.sku)) seen.set(it.sku, it);
+        } catch {}
+        if (seen.size >= fetchSize) break;
+      }
+      if (seen.size) result = { items: [...seen.values()], total_count: seen.size };
+    }
+
+    if (!result.items || result.items.length === 0) {
+      return { products: [], total: 0, message: `No products found matching "${query}". Try simpler keywords or browse our categories.` };
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);

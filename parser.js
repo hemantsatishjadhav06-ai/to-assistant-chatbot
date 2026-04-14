@@ -36,6 +36,7 @@ const CATEGORY_HINTS = {
   strings:     /\b(string|strings|gut|polyester)\b/i,
   bags:        /\b(bag|bags|backpack|kitbag)\b/i,
   accessories: /\b(accessor|grip tape|overgrip|dampener|wristband|headband|cap|sock)\b/i,
+  machine:     /\b(ball ?machine|ball ?thrower|ball ?launcher|ball ?cannon|ball ?feeder)\b/i,
   used:        /\b(used|second[- ]?hand|preowned|pre[- ]?owned)\b/i,
   sale:        /\b(sale|discount|offer|wimbledon|grand ?slam|boxing ?day|clearance)\b/i
 };
@@ -162,6 +163,7 @@ function extractOrderId(text) {
 function extractIntentHint(text) {
   const s = text.toLowerCase().trim();
   if (/^(hi|hello|hey|hii|good (morning|afternoon|evening)|namaste)\s*\W*$/i.test(s)) return 'greeting';
+  if (/\b(review|reviews|rating|ratings|customer feedback|star|stars)\b/i.test(s)) return 'review';
   if (/\b(order|tracking|track|dispatch|shipment|delivery)\b/i.test(s) && extractOrderId(s)) return 'order';
   if (/\b(return|refund|shipping|warranty|policy|contact|store hours|phone|address|payment|emi|cod|coupon|welcome10)\b/i.test(s)) return 'policy';
   if (/\b(brands?|which brands?|what brands?)\b/i.test(s) && !/racquet|shoe|ball/i.test(s)) return 'brand';

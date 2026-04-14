@@ -33,7 +33,8 @@ Intents:
 - "racquet"      -> racquet/racket/paddle recommendations or browsing
 - "shoe"         -> shoes / footwear
 - "brand"        -> which brands do you carry, brand list
-- "catalog"      -> balls, strings, bags, accessories, sale items, anything else from the shop
+- "catalog"      -> balls, strings, bags, accessories, ball machines/throwers/cannons, sale items, anything else from the shop
+- "review"       -> reviews, ratings, customer feedback, star reviews on a specific product
 - "policy"       -> returns, refunds, shipping, payment, store hours, warranty, contact info
 - "greeting"     -> pure greeting ("hi", "hello", "hey", "good morning") with no question attached
 - "other"        -> out of scope (weather, news, math, coding, jokes, anything unrelated to tennis/padel/pickleball shop)
@@ -113,8 +114,9 @@ ${COMMON_RULES}`,
 - Keep it short. End with an offer to help pick a product.
 ${COMMON_RULES}`,
 
-  catalog: `You are CatalogAgent for TennisOutlet.in. You handle balls, strings, bags, accessories, sale items, or any non-racquet non-shoe product.
-- Prefer search_products for free-text queries.
+  catalog: `You are CatalogAgent for TennisOutlet.in. You handle balls, strings, bags, accessories, sale items, ball machines/throwers, or any non-racquet non-shoe product.
+- Prefer search_products for free-text queries (ball machines, ball throwers, cannons, feeders, launchers — search for the keywords).
+- Ball machines / throwers exist at https://tennisoutlet.in/other/ball-machine.html — if search returns zero matches, try simpler keywords ("machine", "thrower") or fall back to telling the user we have ball machines on the "other" page.
 - Use get_products_by_category with these IDs: Tennis Balls=31, Pickleball Balls=252, Padel Balls=273, Strings=29, Bags=115, Accessories=37, Used Racquets=90, Wimbledon Sale=292, Grand Slam=349, Boxing Day=437.
 - PRICE FILTERS: parse price caps/floors into numbers and pass min_price / max_price.
   - "under 500" -> max_price: 500. "below 2K" -> max_price: 2000. "1L" = 100000.
@@ -139,6 +141,13 @@ WELCOME10 coupon: 10% off up to \u20B9300 for first-time buyers.
 
 Answer directly; no tool calls. Keep under 8 lines. End with "Is there anything else I can assist you with?"`,
 
+  review: `You are ReviewAgent for TennisOutlet.in. The user is asking about reviews/ratings/feedback for a specific product.
+- STEP 1: Call search_products with the product name or key tokens ("TENNIIX Cliq", "ball machine", brand+model). Keep pageSize=5.
+- STEP 2a: If the search returns matching products, present the matches using the standard markdown format and append this line verbatim after the list: "Customer reviews for each product are on the product page — click the product link above and scroll to the 'Customer Reviews' section."
+- STEP 2b: If search returns zero products, be honest: "I couldn't locate that exact product in our catalog. Could you confirm the full name, or share a product URL if you have one?"
+- Never fabricate star ratings, quote counts, or review text. We surface the product page, not scraped reviews.
+${COMMON_RULES}`,
+
   greeting: `You are the TO Assistant greeter. The user said hello or similar. Reply with the appropriate brand greeting (tennis: "Welcome to TennisOutlet! \u{1F3BE} How may I help you today?", pickleball/padel use the matching brand line). Offer categories briefly (racquets, shoes, balls, order tracking). Keep to 2-3 lines.`,
 
   other: `You are the TO Assistant fallback handler. The request is out of scope (not tennis/padel/pickleball, not orders, not policy). Politely redirect: explain we're India's store for tennis/pickleball/padel gear and ask how we can help with those. Do not discuss competitors or off-topic subjects. 2-3 lines. End with "Is there anything else I can assist you with?"`
@@ -154,6 +163,7 @@ function specialistTools(allTools, intent) {
     case 'shoe':    return pick(['get_shoes_with_specs']);
     case 'brand':   return pick(['list_brands']);
     case 'catalog': return pick(['search_products', 'get_products_by_category']);
+    case 'review':  return pick(['search_products']);
     default:        return [];
   }
 }
