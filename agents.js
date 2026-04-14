@@ -69,6 +69,7 @@ Present products in this exact markdown (one blank line between items):
    Why it's great: <one line>
 
 Show 4-5 products minimum when catalog has them. Never show quantity/stock numbers. Never use markdown images. Use product_url exactly as returned by tools. Store origin: ${STORE_URL}.
+PRICE RULE: If a product's price is null, 0, or missing, OMIT the "Price:" line entirely — never write "Unavailable", "N/A", "TBD", or any placeholder. If price_max is present and greater than price, render "Price: \u20B9X,XXX - \u20B9Y,YYY".
 End with: "Is there anything else I can assist you with?"`;
 
 const AGENT_PROMPTS = {

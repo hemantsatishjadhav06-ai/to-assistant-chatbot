@@ -615,6 +615,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, Math.min(page_size, 20));
+    await enrichConfigurablePrices(available);
     return {
       sport, filters_applied: { brand, shoe_type, court_type, width, cushioning },
       products: available, total: result.total_count, showing: available.length
@@ -669,6 +670,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const available = (allZero ? shaped : shaped.filter(p => p.qty >= 1))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, Math.min(page_size, 20));
+    await enrichConfigurablePrices(available);
     return {
       sport, filters_applied: { brand, skill_level },
       products: available, total: result.total_count, showing: available.length
@@ -677,6 +679,35 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     console.error('getRacquetsWithSpecs error:', error.response?.status, error.message);
     return { error: true, message: `Unable to fetch ${sport} racquets. ${error.message}` };
   }
+}
+
+// Resolve configurable-parent price from first in-stock child, in parallel.
+// Magento often stores price=0 on configurable parents; children hold the real price.
+async function enrichConfigurablePrices(products) {
+  const needing = products.filter(p => !p.price || p.price === 0);
+  if (needing.length === 0) return products;
+  await Promise.all(needing.map(async p => {
+    try {
+      const children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
+      if (Array.isArray(children) && children.length) {
+        // Pick the lowest non-zero price across children; fall back to first.
+        const prices = children.map(c => parseFloat(c.price || 0)).filter(v => v > 0);
+        if (prices.length) {
+          p.price = Math.min(...prices);
+          const maxP = Math.max(...prices);
+          if (maxP > p.price) p.price_max = maxP;
+        } else if (children[0].price) {
+          p.price = parseFloat(children[0].price);
+        }
+        // Also pull a special_price if any child has one
+        const sp = children.map(c => parseFloat(c.special_price || 0)).filter(v => v > 0);
+        if (sp.length && !p.special_price) p.special_price = Math.min(...sp);
+      }
+    } catch (e) {
+      // leave price as-is; the specialist will omit it gracefully
+    }
+  }));
+  return products;
 }
 
 function listBrands() {
