@@ -11,6 +11,8 @@ const sessionStore = require('./session');        // v3.3 fallback (sync, in-mem
 const memory      = require('./memory');           // v4.0 Postgres-backed
 const identity    = require('./identity');
 const db          = require('./db');
+const actions     = require('./actions');           // v4.1 transactional actions
+const flags       = require('./flags');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1340,7 +1342,9 @@ app.get('/api/health', async (req, res) => {
     supabase: supa.ok ? 'connected' : `disconnected:${supa.reason}`,
     memory: memory.stats(),
     model: OPENROUTER_MODEL,
-    version: '4.0-alpha',
+    version: '4.1-alpha',
+    writes_enabled: flags.WRITES_ENABLED,
+    action_dryrun: flags.ACTION_DRYRUN,
     timestamp: new Date().toISOString()
   });
 });
@@ -1349,12 +1353,61 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// v4: give identity module a handle to magentoGet so it can look up customers
-// by email. Done here (not at top of file) to avoid any circular-require risks.
+// v4: give identity + actions modules handles to Magento/OAuth helpers here
+// (not at top of file) to avoid any circular-require risks.
 identity.init({ magentoGet });
+actions.init({ magentoGet, oauthGet });
+
+// ==================== v4.1 ACTIONS API ====================
+// Two-turn confirmation protocol. The chat agent proposes, the client
+// confirms through a separate endpoint. Proposals for READ actions execute
+// inline. Writes return a confirmation_token that must be POSTed back.
+
+app.get('/api/actions/catalogue', (req, res) => {
+  res.json({
+    writes_enabled: flags.WRITES_ENABLED,
+    dryrun: flags.ACTION_DRYRUN,
+    confirm_ttl_min: flags.CONFIRM_TTL_MIN,
+    actions: actions.catalogue()
+  });
+});
+
+app.post('/api/actions/propose', async (req, res) => {
+  try {
+    const { name, params, session_id, customer_id, customer } = req.body || {};
+    if (!name) return res.status(400).json({ ok: false, error: 'name required' });
+    const out = await actions.propose({ name, params: params || {}, session_id, customer_id, customer });
+    res.json(out);
+  } catch (e) {
+    console.error('[actions/propose]', e.message);
+    res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+app.post('/api/actions/confirm', async (req, res) => {
+  try {
+    const { confirmation_token, customer } = req.body || {};
+    const out = await actions.confirm(confirmation_token, { customer });
+    res.json(out);
+  } catch (e) {
+    console.error('[actions/confirm]', e.message);
+    res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
+
+app.post('/api/actions/cancel', async (req, res) => {
+  try {
+    const { confirmation_token } = req.body || {};
+    const out = await actions.cancel(confirmation_token);
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: 'internal' });
+  }
+});
 
 app.listen(PORT, async () => {
-  console.log(`\n\u{1F3BE} TO Assistant v4.0-alpha running on :${PORT}`);
+  console.log(`\n\u{1F3BE} TO Assistant v4.1-alpha running on :${PORT}`);
+  console.log(`\u{1F511} Writes enabled: ${flags.WRITES_ENABLED} | DryRun: ${flags.ACTION_DRYRUN}`);
   console.log(`\u{1F916} Model: ${OPENROUTER_MODEL}`);
   console.log(`\u{1F517} Magento: ${MAGENTO_REST}`);
   console.log(`\u{1F510} OAuth configured: ${!!OAUTH_CONSUMER_KEY}`);
