@@ -223,6 +223,62 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
   {
     type: "function",
     function: {
+      name: "get_ball_machines",
+      description: "Return ALL ball-machine-type products (ball machines, throwers, cannons, launchers, feeders) from TennisOutlet.in with product links. Combines category lookup (discovered from Magento category tree at startup), free-text search across name/sku/url_key, and slug matching. Use this for ANY ball machine / ball thrower / ball cannon query — do NOT use get_products_by_category or search_products for these, because ball machines are not in the standard category IDs.",
+      parameters: {
+        type: "object",
+        properties: {
+          min_price: { type: "number", description: "Optional min price in INR." },
+          max_price: { type: "number", description: "Optional max price in INR. '1L'->100000, '50K'->50000." },
+          page_size: { type: "integer", default: 10 }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_product_reviews",
+      description: "Fetch customer reviews for a product from Magento. Pass either {sku} if you already know it, or {query} as free text (product name/keywords). Returns product link, review list with rating/title/detail/nickname, average rating percent, and a review_page_hint URL. If the endpoint isn't accessible, returns empty reviews with a message pointing to the product page reviews section.",
+      parameters: {
+        type: "object",
+        properties: {
+          sku: { type: "string", description: "Product SKU if known." },
+          query: { type: "string", description: "Free-text product name/keywords when SKU is unknown." },
+          page_size: { type: "integer", default: 5 }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_categories",
+      description: "Search the Magento category tree by keyword and return matching category IDs + paths. Use when you need to discover the exact category ID for an unusual product type (e.g. 'pressureless balls', 'kids racquets').",
+      parameters: {
+        type: "object",
+        properties: { keyword: { type: "string", description: "Keyword to match against category name or path." } },
+        required: ["keyword"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_categories",
+      description: "List every active Magento category as a flat array with id, name, full path, and product_count. Use when the user asks 'what categories do you have' or for catalog discovery.",
+      parameters: {
+        type: "object",
+        properties: {
+          min_level: { type: "integer", description: "Minimum tree level (1=root children, 2=sub, etc.). Default 1.", default: 1 },
+          active_only: { type: "boolean", default: true }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "search_products",
       description: "Search the full TennisOutlet.in catalog by name/keyword. Returns only available (qty>=1) items, sorted highest-qty first. Supports price filters.",
       parameters: {
@@ -263,6 +319,62 @@ function extractCustomAttrs(item) {
   const attrs = {};
   (item.custom_attributes || []).forEach(a => { attrs[a.attribute_code] = a.value; });
   return attrs;
+}
+
+// ==================== CATEGORY MAP (v3.3.2) ====================
+// Walks the Magento category tree once at startup so we can discover
+// categories by keyword instead of hard-coding IDs everywhere.
+// CATEGORY_MAP = [{ id, name, level, parent_id, path, url_key }]
+let CATEGORY_MAP = [];
+const BALL_MACHINE_CATEGORY_IDS = [];
+
+async function initCategoryMap() {
+  try {
+    // /V1/categories returns the root tree (recursive). Walk it.
+    const res = await axios.get(`${MAGENTO_REST}/categories`, {
+      headers: { 'Authorization': `Bearer ${MAGENTO_TOKEN}`, 'Accept': 'application/json' },
+      timeout: 20000
+    });
+    const flat = [];
+    const walk = (node, parentPath = '') => {
+      if (!node) return;
+      const current = {
+        id: node.id,
+        name: node.name,
+        level: node.level,
+        parent_id: node.parent_id,
+        path: parentPath ? `${parentPath} > ${node.name}` : node.name,
+        is_active: node.is_active !== false,
+        product_count: node.product_count || 0
+      };
+      flat.push(current);
+      (node.children_data || []).forEach(c => walk(c, current.path));
+    };
+    walk(res.data);
+    CATEGORY_MAP = flat;
+    console.log(`[category-map] loaded ${flat.length} categories`);
+
+    // Detect ball-machine-like categories by name.
+    const re = /ball.?machine|ball.?thrower|ball.?cannon|ball.?launcher|ball.?feeder/i;
+    for (const c of flat) if (re.test(c.name)) BALL_MACHINE_CATEGORY_IDS.push(c.id);
+    console.log(`[category-map] ball-machine category ids: ${JSON.stringify(BALL_MACHINE_CATEGORY_IDS)}`);
+  } catch (e) {
+    console.log(`[category-map] failed:`, e.response?.status || e.message);
+  }
+}
+
+function findCategoriesByKeyword(keyword) {
+  if (!keyword) return [];
+  const re = new RegExp(String(keyword).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  return CATEGORY_MAP.filter(c => re.test(c.name) || re.test(c.path)).map(c => ({
+    id: c.id, name: c.name, path: c.path, product_count: c.product_count
+  }));
+}
+
+function listAllCategories({ min_level = 1, active_only = true } = {}) {
+  return CATEGORY_MAP
+    .filter(c => c.level >= min_level && (!active_only || c.is_active))
+    .map(c => ({ id: c.id, name: c.name, path: c.path, product_count: c.product_count }));
 }
 
 // ==================== ATTRIBUTE OPTION CACHE ====================
@@ -864,6 +976,141 @@ function listBrands() {
   return { total: brands.length, brands };
 }
 
+// ==================== BALL MACHINES (v3.3.2) ====================
+// Combines three strategies (category → search tokens → url_key LIKE) and
+// unions the results, so we return every ball-machine-shaped product the
+// catalog has, even if a category wasn't indexed or the search stopped short.
+async function getBallMachines({ page_size = 10, min_price = null, max_price = null } = {}) {
+  const seen = new Map();
+
+  // Strategy A: any ball-machine categories discovered at startup.
+  for (const catId of BALL_MACHINE_CATEGORY_IDS) {
+    try {
+      const byCat = await getProductsByCategory(catId, 20, { min_price, max_price });
+      for (const p of (byCat.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
+    } catch {}
+  }
+
+  // Strategy B: free-text search across name+sku+url_key with token fallback.
+  const queries = ['ball machine', 'ball thrower', 'ball cannon', 'ball launcher', 'ball feeder'];
+  for (const q of queries) {
+    try {
+      const bySearch = await searchProducts(q, 10, { min_price, max_price });
+      for (const p of (bySearch.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
+    } catch {}
+    if (seen.size >= page_size * 2) break;
+  }
+
+  // Strategy C: direct url_key slug match (Magento url_key often is "ball-machine").
+  try {
+    const params = {
+      'searchCriteria[filter_groups][0][filters][0][field]': 'url_key',
+      'searchCriteria[filter_groups][0][filters][0][value]': '%ball%machine%',
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
+      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+      'searchCriteria[filter_groups][1][filters][0][value]': 1,
+      'searchCriteria[pageSize]': 20
+    };
+    const result = await magentoGet('/products', params);
+    if (result.items && result.items.length) {
+      const skus = result.items.map(i => i.sku);
+      const stockMap = await fetchStockMap(skus);
+      const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+      await enrichConfigurables(shaped);
+      for (const p of shaped) if (!seen.has(p.sku)) seen.set(p.sku, p);
+    }
+  } catch {}
+
+  let pool = [...seen.values()].filter(p => (p.qty || 0) >= 1);
+  if (pool.length === 0) pool = [...seen.values()];
+  pool = applyPriceSizeFilters(pool, { min_price, max_price });
+  const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
+  stripInternals(available);
+
+  let message = null;
+  if (available.length === 0 && seen.size > 0) {
+    message = `Found ${seen.size} ball-machine products, but none match the requested price filter.`;
+  } else if (seen.size === 0) {
+    message = `No ball machines found in the catalog right now. You can also browse https://tennisoutlet.in/other/ball-machine.html directly.`;
+  }
+  return {
+    products: available,
+    total: seen.size,
+    showing: available.length,
+    category_ids_used: BALL_MACHINE_CATEGORY_IDS,
+    message
+  };
+}
+
+// ==================== PRODUCT REVIEWS (v3.3.2) ====================
+// Fetches Magento 2 product reviews. Requires the bearer token to have
+// Magento_Review::reviews ACL (most integration tokens have it by default).
+// Falls back gracefully to a product-page link if the endpoint 403s.
+async function getProductReviews({ sku = null, query = null, page_size = 5 } = {}) {
+  try {
+    // Resolve to a SKU if the caller gave us free text.
+    let resolvedSku = sku;
+    let product = null;
+    if (!resolvedSku && query) {
+      const s = await searchProducts(query, 3);
+      if (s.products && s.products.length) {
+        product = s.products[0];
+        resolvedSku = product.sku;
+      }
+    }
+    if (!resolvedSku) {
+      return { found: false, message: `Couldn't find a product matching "${query}". Try the exact product name or paste the product URL.` };
+    }
+
+    // Canonical product record for the link.
+    if (!product) {
+      try {
+        const res = await magentoGet(`/products/${encodeURIComponent(resolvedSku)}`);
+        const stock = await fetchStockMap([res.sku]);
+        product = shapeProduct(res, stock[res.sku] || 0);
+      } catch {}
+    }
+
+    // Try Magento review endpoint.
+    let reviews = [];
+    let avgRating = null;
+    let endpointError = null;
+    try {
+      const res = await axios.get(`${MAGENTO_REST}/products/${encodeURIComponent(resolvedSku)}/reviews`, {
+        headers: { 'Authorization': `Bearer ${MAGENTO_TOKEN}`, 'Accept': 'application/json' },
+        timeout: 15000
+      });
+      reviews = (res.data || []).slice(0, page_size).map(r => ({
+        title: r.title || null,
+        detail: (r.detail || '').slice(0, 400),
+        nickname: r.nickname || 'Verified Buyer',
+        created_at: r.created_at || null,
+        ratings: (r.ratings || []).map(rt => ({ name: rt.rating_name, value: rt.value, percent: rt.percent }))
+      }));
+      // Average rating from per-review rating percent values.
+      const all = (res.data || []).flatMap(r => (r.ratings || []).map(rt => Number(rt.percent))).filter(n => isFinite(n));
+      if (all.length) avgRating = Math.round(all.reduce((a, b) => a + b, 0) / all.length);
+    } catch (e) {
+      endpointError = e.response?.status || e.message;
+    }
+
+    return {
+      found: true,
+      product: product ? { name: product.name, sku: product.sku, product_url: product.product_url, price: product.price } : { sku: resolvedSku },
+      reviews,
+      total_reviews: reviews.length,
+      average_rating_percent: avgRating,
+      endpoint_error: endpointError,
+      review_page_hint: product?.product_url ? `${product.product_url}#reviews` : null,
+      message: reviews.length === 0
+        ? `No reviews fetched from the API${endpointError ? ` (${endpointError})` : ''}. Customer reviews appear on the product page itself — direct the user to click the product link and scroll to the 'Customer Reviews' section.`
+        : null
+    };
+  } catch (e) {
+    return { error: true, message: `Review lookup failed: ${e.message}` };
+  }
+}
+
 // ==================== EXECUTE ====================
 async function executeFunction(name, args) {
   switch (name) {
@@ -873,6 +1120,10 @@ async function executeFunction(name, args) {
     case 'get_shoes_with_specs': return await getShoesWithSpecs(args || {});
     case 'get_racquets_with_specs': return await getRacquetsWithSpecs(args || {});
     case 'list_brands': return listBrands();
+    case 'get_ball_machines': return await getBallMachines(args || {});
+    case 'find_categories': return { matches: findCategoriesByKeyword(args.keyword) };
+    case 'list_categories': return { categories: listAllCategories(args || {}) };
+    case 'get_product_reviews': return await getProductReviews(args || {});
     default: return { error: true, message: `Unknown function: ${name}` };
   }
 }
@@ -1066,5 +1317,8 @@ app.listen(PORT, async () => {
   console.log(`\u{1F510} OAuth configured: ${!!OAUTH_CONSUMER_KEY}`);
   console.log(`[startup] Loading Magento attribute options...`);
   await loadAttributeOptions();
-  console.log(`[startup] Attribute cache ready.\n`);
+  console.log(`[startup] Attribute cache ready.`);
+  console.log(`[startup] Loading Magento category map...`);
+  await initCategoryMap();
+  console.log(`[startup] Category map ready.\n`);
 });
