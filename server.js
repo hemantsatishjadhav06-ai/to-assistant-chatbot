@@ -699,6 +699,29 @@ function shapeProduct(item, qty) {
       .filter(Boolean);
   }
   if (Object.keys(shoeSpecs).length) shaped.specs = shoeSpecs;
+
+  // v4.2.6: for SIMPLE products (per-size SKUs like TSH0001-7), compute
+  // _size_tokens directly on the parent so applyPriceSizeFilters can match
+  // without needing configurable children. Source order: resolved attribute
+  // labels -> raw attribute values -> SKU suffix -> name tokens.
+  if (item.type_id === 'simple') {
+    const tokens = new Set();
+    for (const code of SIZE_ATTR_CANDIDATES) {
+      const raw = attrs[code];
+      if (raw == null || raw === '') continue;
+      const resolved = resolveAttr(code, raw);
+      const strs = [Array.isArray(resolved) ? resolved.join(',') : String(resolved), String(raw)];
+      for (const s of strs) {
+        (s.match(/\d+(?:\.\d+)?/g) || []).forEach(n => tokens.add(n));
+      }
+    }
+    const skuTail = String(item.sku || '').match(/[-_](\d+(?:\.\d+)?)[A-Za-z]*$/);
+    if (skuTail) tokens.add(skuTail[1]);
+    const nameSize = String(item.name || '').match(/\b(?:size|us|uk|eu)\s*(\d+(?:\.\d+)?)|[-_](\d+(?:\.\d+)?)\s*$/i);
+    if (nameSize) tokens.add(nameSize[1] || nameSize[2]);
+    if (tokens.size) shaped._size_tokens = Array.from(tokens);
+  }
+
   return shaped;
 }
 
@@ -1123,7 +1146,19 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
     if (max != null && price > 0 && price > max) return false;
     if (min != null && price > 0 && price < min) return false;
     if (want != null && !isNaN(want)) {
-      if (!Array.isArray(p._children) || p._children.length === 0) return false;
+      // v4.2.6: SIMPLE products (per-size SKUs like TSH0001-7) expose
+      // _size_tokens directly on the parent. Match those first with qty>=1.
+      const parentTokens = Array.isArray(p._size_tokens) ? p._size_tokens : [];
+      if (parentTokens.length) {
+        const parentHit = (p.qty || 0) >= 1 && parentTokens.some(t => parseFloat(t) === want);
+        if (parentHit) return true;
+        // parent has size metadata but doesn't match → drop
+        if (!Array.isArray(p._children) || p._children.length === 0) return false;
+      }
+      if (!Array.isArray(p._children) || p._children.length === 0) {
+        // no child variants AND no usable parent tokens → cannot confirm → drop
+        return false;
+      }
       // Match against the broadened _size_tokens set (labels, SKU suffixes,
       // name tokens). Legacy: also accept the first numeric in c.size.
       const hit = p._children.some(c => {
@@ -1148,6 +1183,7 @@ function stripInternals(products) {
       delete p._children;
     }
     if (p._type_id) delete p._type_id;
+    if (p._size_tokens) delete p._size_tokens;
   });
   return products;
 }
