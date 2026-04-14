@@ -1004,17 +1004,40 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, keyword = 
     if (brand) {
       const bid = brandNameToId(brand);
       if (bid) filters.push({ group: idx++, field: 'brands', value: bid });
+      else console.warn(`[racquets] brandNameToId("${brand}") returned null — brand filter skipped`);
     }
     // Skill-level mapping to Magento categories (intersect via multiple category filters)
     const SKILL_CATS = { beginner: 87, intermediate: 80, advanced: 79, senior: 88, junior: 81 };
     if (skill_level && SKILL_CATS[String(skill_level).toLowerCase()]) {
       filters.push({ group: idx++, field: 'category_id', value: SKILL_CATS[String(skill_level).toLowerCase()] });
     }
+    // v4.2.8: push keyword to Magento as a server-side `name like %keyword%` filter
+    // so we narrow BEFORE the 300-item client cap. This is what fixes queries like
+    // "head boom" — without server-side narrowing, the Head pool could overflow
+    // the cap and Boom variants might never reach the client keyword filter.
+    let kwFilterIdx = -1;
+    if (keyword) {
+      const kwTrim = String(keyword).trim();
+      if (kwTrim) {
+        kwFilterIdx = idx;
+        filters.push({ group: idx++, field: 'name', value: `%${kwTrim}%`, condition_type: 'like' });
+      }
+    }
 
     // Fetch the entire racquet/paddle pool in one go (up to 300 across pages).
-    const result = await fetchProductsPaginated(filters, { maxItems: 300 });
+    let result = await fetchProductsPaginated(filters, { maxItems: 300 });
+    // v4.2.8 fallback: if a keyword query returns zero, retry WITHOUT the keyword
+    // filter so the user sees the brand lineup instead of a "no results" dead-end.
+    // This complements the agent-prompt retry with a server-level safety net.
+    let keyword_fallback_used = false;
+    if ((!result.items || result.items.length === 0) && kwFilterIdx >= 0) {
+      const fallbackFilters = filters.filter((_, i) => i !== kwFilterIdx);
+      result = await fetchProductsPaginated(fallbackFilters, { maxItems: 300 });
+      keyword_fallback_used = true;
+      console.warn(`[racquets] keyword "${keyword}" + brand "${brand}" returned zero at Magento — falling back to brand-only lineup`);
+    }
     if (!result.items || result.items.length === 0) {
-      return { products: [], total: 0, message: `No ${sport} racquets matched those filters.` };
+      return { products: [], total: 0, message: `No ${sport} racquets matched those filters.`, filters_applied: { brand, keyword, skill_level } };
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
@@ -1054,13 +1077,19 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, keyword = 
     }
     return {
       sport, filters_applied: { brand, keyword, skill_level, min_price, max_price },
+      keyword_fallback_used,
       products: available, total: result.total_count, showing: available.length,
       offset, next_offset: offset + available.length, has_more, shown_skus,
       pool_size_after_filters: poolFiltered.length, filtered_out, message
     };
   } catch (error) {
-    console.error('getRacquetsWithSpecs error:', error.response?.status, error.message);
-    return { error: true, message: `Unable to fetch ${sport} racquets. ${error.message}` };
+    console.error('getRacquetsWithSpecs error:', {
+      status: error.response?.status,
+      data: error.response?.data,
+      message: error.message,
+      args: { sport, brand, keyword, skill_level, min_price, max_price }
+    });
+    return { error: true, message: `Unable to fetch ${sport} racquets right now.`, detail: error.message };
   }
 }
 
