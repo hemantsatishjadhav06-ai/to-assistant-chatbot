@@ -664,6 +664,7 @@ function shapeProduct(item, qty) {
   const shaped = {
     name: item.name,
     sku: item.sku,
+    _type_id: item.type_id || null,
     price: parseFloat(item.price || 0) || null,
     special_price: attrs.special_price ? parseFloat(attrs.special_price) : null,
     brand: brandLabel,
@@ -884,7 +885,10 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const allZero = Object.values(stockMap).every(v => !v);
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
     // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
-    await enrichConfigurables(shaped);
+    // When a size filter is requested we MUST resolve children for every configurable
+    // parent — not just the ones with missing price/qty — otherwise applyPriceSizeFilters
+    // drops configurables whose parents already had price+qty set (false negatives).
+    await enrichConfigurables(shaped, { forceAll: !!size });
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
     let pool = inStock.length ? inStock : (allZero ? shaped : []);
     // Customer-requested filters: size, min_price, max_price.
@@ -999,8 +1003,13 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
 // Magento stores price=0 and qty=0 on configurable parents; real values live on children.
 // After this runs, p.price / p.price_max / p.qty reflect the child aggregate, and
 // p._children holds per-child {sku, price, qty, size} for downstream size/price filtering.
-async function enrichConfigurables(products) {
-  const targets = products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
+async function enrichConfigurables(products, { forceAll = false } = {}) {
+  // By default we only enrich parents missing price/qty. But when a downstream
+  // filter needs child-level data (e.g. shoe size availability), callers pass
+  // forceAll:true so every configurable parent gets its children resolved.
+  const targets = forceAll
+    ? products.filter(p => p && (p._type_id === 'configurable' || !p.price || p.price === 0 || !p.qty || p.qty === 0))
+    : products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
   if (targets.length === 0) return products;
   await Promise.all(targets.map(async p => {
     try {
@@ -1068,7 +1077,11 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
 
 // Strip internal-only fields before returning to the LLM (keeps payload small).
 function stripInternals(products) {
-  (products || []).forEach(p => { if (p && p._children) delete p._children; });
+  (products || []).forEach(p => {
+    if (!p) return;
+    if (p._children) delete p._children;
+    if (p._type_id) delete p._type_id;
+  });
   return products;
 }
 

@@ -81,7 +81,7 @@ const AGENT_PROMPTS = {
 - Share ONLY: order_id, status_label, created_at (date only), and tracking (carrier + AWB + tracking_url) if present.
 - NEVER reveal: amount, address, items/products ordered, payment method, customer name, personal info.
 - Use the tool's status_label verbatim (Magento's actual status — e.g. "Delivered", "Processing", "Shipped"). Do not paraphrase.
-- Use the tracking_url the tool returns as-is. It will be Blue Dart (www.bluedart.com/tracking?trackFor=0&trackNo=<AWB>) or Delhivery (www.delhivery.com/track-v2/package/<AWB>). Never hard-code Blue Dart when the tool returned a Delhivery URL.
+- TRACKING LINK FORMAT (STRICT): render the tracking link as a markdown link containing the ACTUAL URL string the tool returned — e.g. "[Track your order](https://www.bluedart.com/tracking?trackFor=0&trackNo=80056884670)". NEVER write "Tracking Link" or "__Track Your Order__" with an empty / placeholder / omitted URL. If tracking_url is null, say "Tracking will be available once the shipment is dispatched" and do NOT invent a link. The URL must be the exact string from tracking_url — do not modify, shorten, or relabel it.
 - Orders dispatch within 8 hours. Delivery 2-5 business days.
 - If no order found, politely ask the customer to verify the ID/email and suggest calling +91 9502517700 (Mon-Sat 10 AM - 6 PM).
 ${COMMON_RULES}`,
