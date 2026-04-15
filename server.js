@@ -10,6 +10,7 @@ const slotParser = require('./parser');
 const sessionStore = require('./session');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 // Middleware
@@ -1286,21 +1287,25 @@ app.post('/api/chat-agents', async (req, res) => {
 
 // ==================== HEALTH ====================
 app.get('/api/health', async (req, res) => {
+  const pkg = require('./package.json');
   let magentoStatus = 'unknown';
   let oauthStatus = 'unknown';
+  const errors = {};
   try { await magentoGet('/store/storeConfigs'); magentoStatus = 'connected'; }
-  catch { magentoStatus = 'disconnected'; }
+  catch (e) { magentoStatus = 'disconnected'; errors.magento_bearer = e.response?.status ? `HTTP ${e.response.status}` : (e.code || e.message || 'unknown'); }
   try {
     if (OAUTH_CONSUMER_KEY) {
       await oauthGet('/orders', { 'searchCriteria[pageSize]': 1 });
       oauthStatus = 'connected';
     } else { oauthStatus = 'not-configured'; }
-  } catch { oauthStatus = 'disconnected'; }
+  } catch (e) { oauthStatus = 'disconnected'; errors.magento_oauth = e.response?.status ? `HTTP ${e.response.status}` : (e.code || e.message || 'unknown'); }
 
   res.json({
     status: 'running',
+    version: pkg.version,
     magento_bearer: magentoStatus,
     magento_oauth: oauthStatus,
+    errors: Object.keys(errors).length ? errors : undefined,
     model: OPENROUTER_MODEL,
     timestamp: new Date().toISOString()
   });
