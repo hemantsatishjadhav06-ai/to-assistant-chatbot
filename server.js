@@ -847,8 +847,11 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     filters.push({ group: idx++, field: 'category_id', value: catId });
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
-    // CRITICAL: exclude grip-size child variants; only return parent products
-    filters.push({ group: idx++, field: 'type_id', value: 'configurable' });
+    // v4.5.0: configurable-only restriction applies ONLY to tennis (grip-size variants).
+    // Pickleball paddles & padel rackets are simple SKUs — restricting breaks them.
+    if (String(sport).toLowerCase() === 'tennis') {
+      filters.push({ group: idx++, field: 'type_id', value: 'configurable' });
+    }
 
     if (brand) {
       const bid = brandNameToId(brand);
