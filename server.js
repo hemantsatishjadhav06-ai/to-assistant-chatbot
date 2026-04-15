@@ -104,15 +104,18 @@ PRODUCT PRESENTATION RULES (VERY IMPORTANT):
 - After the list, add a short comparative insight (beginner vs. intermediate, power vs. control, etc.).
 
 ROUTING RULES (STRICT - follow these exactly):
+- CATEGORY-FIRST DISCIPLINE (v3.3 pattern): For ANY product/inventory query, you must either (a) use a well-known specialty tool (get_racquets_with_specs, get_shoes_with_specs, get_ball_machines) when it clearly fits, OR (b) resolve the category_id FIRST via find_categories(keyword:"..."), THEN call get_products_by_category(category_id). Never invent a category_id from memory for anything off the well-known list below. If the user's term is unusual ("used racquets", "kids gear", "pressureless balls", "wimbledon sale", "trade-in", "demo racquets"), call find_categories FIRST.
 - ANY query about RACQUETS / RACKETS / PADDLES (including "which racquet", "best racquet", "recommend a racquet", "beginner racquet", brand-specific racquets) -> MUST call get_racquets_with_specs. NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434) for racquet queries - those categories include balls and accessories.
 - ANY query about SHOES / FOOTWEAR -> MUST call get_shoes_with_specs (never get_products_by_category for shoes).
 - ANY query about BRANDS carried by the store -> call list_brands.
-- BALLS -> get_products_by_category (Tennis Balls=31, Pickleball Balls=252, Padel Balls=273).
-- STRINGS -> get_products_by_category (29).
-- BAGS -> get_products_by_category (115).
-- ACCESSORIES -> get_products_by_category (37).
-- USED racquets -> get_products_by_category (90).
-- Sale/Wimbledon/Grand Slam offers -> get_products_by_category (292/349/437).
+- Well-known direct-route category IDs (safe to pass to get_products_by_category without find_categories):
+  * BALLS -> Tennis Balls=31, Pickleball Balls=252, Padel Balls=273
+  * STRINGS -> 29
+  * BAGS -> 115 (tennis), 254 (pickleball), 275 (padel)
+  * ACCESSORIES -> 37
+  * USED racquets -> 90
+  * Sale/Wimbledon/Grand Slam -> 292/349/437
+- For ANYTHING else, use find_categories first. It's better to make one extra call than to hallucinate an ID.
 
 SMART GUIDELINES:
 - Beginner racquet -> get_racquets_with_specs({skill_level:"beginner"}) + add beginner advice (lighter, larger head size, forgiving).
@@ -316,6 +319,20 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
           min_level: { type: "integer", description: "Minimum tree level (1=root children, 2=sub, etc.). Default 1.", default: 1 },
           active_only: { type: "boolean", default: true }
         }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "find_categories",
+      description: "[v3.3 category-first pattern] Search the Magento category tree by keyword and return matching {id, name, path, product_count}. Use this FIRST for ANY product/inventory query when you are not 100% sure of the category_id (e.g. 'used racquets', 'kids gear', 'pressureless balls', 'trade-in', 'wimbledon sale'). After getting a category_id, call get_products_by_category with it. Do not guess category IDs.",
+      parameters: {
+        type: "object",
+        properties: {
+          keyword: { type: "string", description: "Keyword to match against category name or full path (case-insensitive)." }
+        },
+        required: ["keyword"]
       }
     }
   },
@@ -1648,7 +1665,7 @@ app.get('/api/health', async (req, res) => {
     supabase: supa.ok ? 'connected' : `disconnected:${supa.reason}`,
     memory: memory.stats(),
     model: OPENROUTER_MODEL,
-    version: '4.1-alpha',
+    version: '4.3.0-alpha.1',
     writes_enabled: flags.WRITES_ENABLED,
     action_dryrun: flags.ACTION_DRYRUN,
     timestamp: new Date().toISOString()
