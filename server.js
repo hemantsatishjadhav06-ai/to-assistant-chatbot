@@ -10,6 +10,7 @@ const slotParser = require('./parser');
 const sessionStore = require('./session');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 // Middleware
@@ -92,8 +93,15 @@ PRODUCT PRESENTATION RULES (VERY IMPORTANT):
 - The tool returns products sorted highest-qty first. Feature the FIRST product prominently as the recommended upsell pick.
 - After the list, add a short comparative insight (beginner vs. intermediate, power vs. control, etc.).
 
+TERMINOLOGY MAP (CRITICAL - always apply BEFORE routing):
+- "paddleball" / "paddle ball" / "pickle" / "pickball" / "pickleball" -> PICKLEBALL sport. Paddle product = pickleball paddle (category 250). Balls = 252. Shoes = 253.
+- "padel" / "padel tennis" -> PADEL sport. Racket (not paddle) = category 272. Balls = 273. Shoes = 274.
+- "ball machine" / "ball thrower" / "ball cannon" / "ball launcher" / "ball feeder" / "ai ball machine" / "smart ball machine" -> MUST call get_ball_machines. Never use get_products_by_category or search_products for these.
+- If the customer uses ambiguous term "paddle": assume PICKLEBALL PADDLE unless they explicitly say "padel". If "racket" without sport, assume TENNIS.
+- If a query mentions ANY product that exists in our catalog (tennis, pickleball, padel, ball machine, shoes, strings, bags, accessories), you MUST call the appropriate Magento tool. NEVER reply "we don't have that" or "I can't fetch" without first trying search_products as a fallback.
+
 ROUTING RULES (STRICT - follow these exactly):
-- ANY query about RACQUETS / RACKETS / PADDLES (including "which racquet", "best racquet", "recommend a racquet", "beginner racquet", brand-specific racquets) -> MUST call get_racquets_with_specs. NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434) for racquet queries - those categories include balls and accessories.
+- ANY query about RACQUETS / RACKETS / PADDLES (tennis racquet, padel racket, pickleball paddle, paddleball paddle, brand-specific) -> MUST call get_racquets_with_specs with the correct sport (tennis/padel/pickleball). NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434).
 - ANY query about SHOES / FOOTWEAR -> MUST call get_shoes_with_specs (never get_products_by_category for shoes).
 - ANY query about BRANDS carried by the store -> call list_brands.
 - BALLS -> get_products_by_category (Tennis Balls=31, Pickleball Balls=252, Padel Balls=273).
@@ -102,6 +110,7 @@ ROUTING RULES (STRICT - follow these exactly):
 - ACCESSORIES -> get_products_by_category (37).
 - USED racquets -> get_products_by_category (90).
 - Sale/Wimbledon/Grand Slam offers -> get_products_by_category (292/349/437).
+- FALLBACK: If no rule above matches the product type, call search_products with the customer's keywords. NEVER refuse a product query without trying at least one Magento tool.
 
 SMART GUIDELINES:
 - Beginner racquet -> get_racquets_with_specs({skill_level:"beginner"}) + add beginner advice (lighter, larger head size, forgiving).
@@ -1286,21 +1295,25 @@ app.post('/api/chat-agents', async (req, res) => {
 
 // ==================== HEALTH ====================
 app.get('/api/health', async (req, res) => {
+  const pkg = require('./package.json');
   let magentoStatus = 'unknown';
   let oauthStatus = 'unknown';
+  const errors = {};
   try { await magentoGet('/store/storeConfigs'); magentoStatus = 'connected'; }
-  catch { magentoStatus = 'disconnected'; }
+  catch (e) { magentoStatus = 'disconnected'; errors.magento_bearer = e.response?.status ? `HTTP ${e.response.status}` : (e.code || e.message || 'unknown'); }
   try {
     if (OAUTH_CONSUMER_KEY) {
       await oauthGet('/orders', { 'searchCriteria[pageSize]': 1 });
       oauthStatus = 'connected';
     } else { oauthStatus = 'not-configured'; }
-  } catch { oauthStatus = 'disconnected'; }
+  } catch (e) { oauthStatus = 'disconnected'; errors.magento_oauth = e.response?.status ? `HTTP ${e.response.status}` : (e.code || e.message || 'unknown'); }
 
   res.json({
     status: 'running',
+    version: pkg.version,
     magento_bearer: magentoStatus,
     magento_oauth: oauthStatus,
+    errors: Object.keys(errors).length ? errors : undefined,
     model: OPENROUTER_MODEL,
     timestamp: new Date().toISOString()
   });
