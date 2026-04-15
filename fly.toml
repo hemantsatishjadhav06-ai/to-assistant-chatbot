@@ -1,0 +1,37 @@
+# fly.toml — to-assistant-chatbot
+# After `fly launch --no-deploy`, Fly will rewrite the app name and region.
+# Keep the rest as-is.
+
+app = "to-assistant-chatbot"
+primary_region = "bom"   # Mumbai — closest to India for TennisOutlet.in users
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+  # Non-secret vars — safe to commit:
+  MAGENTO_BASE_URL = "https://console.tennisoutlet.in/rest/V1"
+  MAGENTO_STORE_URL = "https://tennisoutlet.in"
+  OPENROUTER_MODEL = "openai/gpt-4o"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"     # stops when idle, free-tier friendly
+  auto_start_machines = true      # auto-wakes on request
+  min_machines_running = 0
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/health"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
