@@ -363,8 +363,9 @@ async function initCategoryMap() {
     CATEGORY_MAP = flat;
     console.log(`[category-map] loaded ${flat.length} categories`);
 
-    // Detect ball-machine-like categories by name.
-    const re = /ball.?machine|ball.?thrower|ball.?cannon|ball.?launcher|ball.?feeder/i;
+    // Detect ball-machine-like categories by name (also match 'ai ball', 'smart ball').
+    BALL_MACHINE_CATEGORY_IDS.length = 0;
+    const re = /ball.?machine|ball.?thrower|ball.?cannon|ball.?launcher|ball.?feeder|ai.?ball|smart.?ball/i;
     for (const c of flat) if (re.test(c.name)) BALL_MACHINE_CATEGORY_IDS.push(c.id);
     console.log(`[category-map] ball-machine category ids: ${JSON.stringify(BALL_MACHINE_CATEGORY_IDS)}`);
   } catch (e) {
@@ -1005,45 +1006,56 @@ function listBrands() {
 // unions the results, so we return every ball-machine-shaped product the
 // catalog has, even if a category wasn't indexed or the search stopped short.
 async function getBallMachines({ page_size = 10, min_price = null, max_price = null } = {}) {
+  // v4.6.0: run all three strategies IN PARALLEL with a hard 18s ceiling each.
+  // Short-circuit once we have enough to avoid Render 30s request timeout.
   const seen = new Map();
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error('strat-timeout')), ms))]);
 
-  // Strategy A: any ball-machine categories discovered at startup.
-  for (const catId of BALL_MACHINE_CATEGORY_IDS) {
-    try {
-      const byCat = await getProductsByCategory(catId, 20, { min_price, max_price });
-      for (const p of (byCat.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
-    } catch {}
-  }
-
-  // Strategy B: free-text search across name+sku+url_key with token fallback.
-  const queries = ['ball machine', 'ball thrower', 'ball cannon', 'ball launcher', 'ball feeder'];
-  for (const q of queries) {
-    try {
-      const bySearch = await searchProducts(q, 10, { min_price, max_price });
-      for (const p of (bySearch.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
-    } catch {}
-    if (seen.size >= page_size * 2) break;
-  }
-
-  // Strategy C: direct url_key slug match (Magento url_key often is "ball-machine").
-  try {
-    const params = {
-      'searchCriteria[filter_groups][0][filters][0][field]': 'url_key',
-      'searchCriteria[filter_groups][0][filters][0][value]': '%ball%machine%',
-      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
-      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
-      'searchCriteria[filter_groups][1][filters][0][value]': 1,
-      'searchCriteria[pageSize]': 20
-    };
-    const result = await magentoGet('/products', params);
-    if (result.items && result.items.length) {
-      const skus = result.items.map(i => i.sku);
-      const stockMap = await fetchStockMap(skus);
-      const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
-      await enrichConfigurables(shaped);
-      for (const p of shaped) if (!seen.has(p.sku)) seen.set(p.sku, p);
+  const stratA = (async () => {
+    for (const catId of BALL_MACHINE_CATEGORY_IDS) {
+      try {
+        const byCat = await getProductsByCategory(catId, 20, { min_price, max_price });
+        for (const p of (byCat.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
+      } catch {}
     }
-  } catch {}
+  })();
+
+  const stratB = (async () => {
+    const queries = ['ball machine', 'ball thrower', 'ball cannon', 'ball launcher', 'ball feeder', 'ai ball'];
+    await Promise.all(queries.map(async q => {
+      try {
+        const bySearch = await searchProducts(q, 10, { min_price, max_price });
+        for (const p of (bySearch.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
+      } catch {}
+    }));
+  })();
+
+  const stratC = (async () => {
+    try {
+      const params = {
+        'searchCriteria[filter_groups][0][filters][0][field]': 'url_key',
+        'searchCriteria[filter_groups][0][filters][0][value]': '%ball%machine%',
+        'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
+        'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+        'searchCriteria[filter_groups][1][filters][0][value]': 1,
+        'searchCriteria[pageSize]': 20
+      };
+      const result = await magentoGet('/products', params);
+      if (result.items && result.items.length) {
+        const skus = result.items.map(i => i.sku);
+        const stockMap = await fetchStockMap(skus);
+        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+        await enrichConfigurables(shaped);
+        for (const p of shaped) if (!seen.has(p.sku)) seen.set(p.sku, p);
+      }
+    } catch {}
+  })();
+
+  await Promise.allSettled([
+    withTimeout(stratA, 18000),
+    withTimeout(stratB, 18000),
+    withTimeout(stratC, 18000)
+  ]);
 
   let pool = [...seen.values()].filter(p => (p.qty || 0) >= 1);
   if (pool.length === 0) pool = [...seen.values()];
@@ -1308,6 +1320,34 @@ app.post('/api/chat-agents', async (req, res) => {
   }
 });
 
+// ==================== AUTO-REFRESH (v4.6.0) ====================
+// Reloads category tree + attribute options every 30 min so newly-added
+// products / categories are picked up automatically without a redeploy.
+let lastCatalogRefresh = null;
+async function refreshCatalog(reason = 'interval') {
+  const started = Date.now();
+  try {
+    await Promise.allSettled([loadAttributeOptions(), initCategoryMap()]);
+    lastCatalogRefresh = { at: new Date().toISOString(), reason, took_ms: Date.now() - started, categories: CATEGORY_MAP.length, ball_machine_ids: [...BALL_MACHINE_CATEGORY_IDS] };
+    console.log(`[refresh] ${reason} ok - ${CATEGORY_MAP.length} cats in ${Date.now() - started}ms`);
+  } catch (e) {
+    lastCatalogRefresh = { at: new Date().toISOString(), reason, error: e.message };
+    console.log(`[refresh] ${reason} FAILED:`, e.message);
+  }
+}
+setInterval(() => refreshCatalog('interval'), 30 * 60 * 1000).unref?.();
+
+// Webhook so Magento (or a cron) can force a reload on product/category change.
+// Protect with a shared secret in REFRESH_SECRET env var (optional).
+app.post('/api/refresh', async (req, res) => {
+  const secret = process.env.REFRESH_SECRET;
+  if (secret && req.headers['x-refresh-secret'] !== secret) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  await refreshCatalog('webhook');
+  res.json({ ok: true, ...lastCatalogRefresh });
+});
+
 // ==================== HEALTH ====================
 app.get('/api/health', async (req, res) => {
   const pkg = require('./package.json');
@@ -1326,6 +1366,8 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'running',
     version: pkg.version,
+    last_refresh: lastCatalogRefresh,
+    categories_loaded: CATEGORY_MAP.length,
     magento_bearer: magentoStatus,
     magento_oauth: oauthStatus,
     errors: Object.keys(errors).length ? errors : undefined,
