@@ -792,7 +792,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       if (match) filters.push({ group: idx++, field: code, value: match[0] });
     }
 
-    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 4, 100) };
+    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 2, 40) };
     filters.forEach(f => {
       params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
       params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
@@ -860,7 +860,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
       filters.push({ group: idx++, field: 'category_id', value: SKILL_CATS[String(skill_level).toLowerCase()] });
     }
 
-    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 4, 100) };
+    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 2, 40) };
     filters.forEach(f => {
       params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
       params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
@@ -909,7 +909,11 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
 async function enrichConfigurables(products) {
   const targets = products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
   if (targets.length === 0) return products;
-  await Promise.all(targets.map(async p => {
+  // v4.4.0: cap to first 20 and limit concurrency to 5 to avoid Render 30s request timeout
+  const CAP = 20;
+  const CONCURRENCY = 5;
+  const queue = targets.slice(0, CAP);
+  const enrichOne = async p => {
     try {
       const children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
       if (!Array.isArray(children) || children.length === 0) return;
@@ -946,7 +950,15 @@ async function enrichConfigurables(products) {
     } catch {
       // leave as-is; downstream filter will drop if qty<1
     }
-  }));
+  };
+  // concurrency-limited pool
+  const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      if (item) await enrichOne(item);
+    }
+  });
+  await Promise.all(workers);
   return products;
 }
 
