@@ -1030,11 +1030,12 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
     }));
   })();
 
-  const stratC = (async () => {
+  // v4.7.0: broadened — url_key OR name OR sku LIKE patterns; covers "Tenniix AI Ball Machine".
+  const runLike = async (field, value) => {
     try {
       const params = {
-        'searchCriteria[filter_groups][0][filters][0][field]': 'url_key',
-        'searchCriteria[filter_groups][0][filters][0][value]': '%ball%machine%',
+        'searchCriteria[filter_groups][0][filters][0][field]': field,
+        'searchCriteria[filter_groups][0][filters][0][value]': value,
         'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
         'searchCriteria[filter_groups][1][filters][0][field]': 'status',
         'searchCriteria[filter_groups][1][filters][0][value]': 1,
@@ -1049,6 +1050,16 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
         for (const p of shaped) if (!seen.has(p.sku)) seen.set(p.sku, p);
       }
     } catch {}
+  };
+  const stratC = (async () => {
+    await Promise.all([
+      runLike('url_key', '%ball%machine%'),
+      runLike('url_key', '%ai%ball%'),
+      runLike('name',    '%ball machine%'),
+      runLike('name',    '%ai ball%'),
+      runLike('name',    '%tenniix%'),
+      runLike('sku',     '%tenniix%')
+    ]);
   })();
 
   await Promise.allSettled([
@@ -1164,6 +1175,75 @@ async function executeFunction(name, args) {
   }
 }
 
+// ==================== MULTI-AGENT PRE-PROCESSOR (v4.7.0) ====================
+// Deterministic intent + entity extractor. Runs BEFORE the LLM so we can:
+//   (a) force the right tool call when confidence is high (avoids LLM routing errors)
+//   (b) inject structured hints into the system prompt
+//   (c) catch specific product queries the LLM tends to phrase poorly to the API
+// No extra LLM round-trip — pure regex/keyword scoring, so latency stays flat.
+const INTENT_RULES = [
+  // intent,            patterns (match any),                                     forceTool,                                        hint
+  { intent: 'ball_machine',
+    rx: [/ball\s*machine/i, /ball\s*thrower/i, /ball\s*cannon/i, /ball\s*launcher/i, /ball\s*feeder/i, /\btenniix\b/i, /\bai\s*ball\b/i, /smart\s*ball/i],
+    force: 'get_ball_machines' },
+  { intent: 'pickleball_paddle',
+    rx: [/pickle\s*ball.*paddle/i, /paddle.*pickle/i, /pickleball\s+paddle/i, /paddleball\s+paddle/i, /pickle\s*paddle/i],
+    force: 'get_racquets_with_specs', hintArgs: { sport: 'pickleball' } },
+  { intent: 'padel_racket',
+    rx: [/\bpadel\b.*(racket|racquet)/i, /(racket|racquet).*\bpadel\b/i],
+    force: 'get_racquets_with_specs', hintArgs: { sport: 'padel' } },
+  { intent: 'tennis_racquet',
+    rx: [/tennis.*(racquet|racket)/i, /(racquet|racket).*tennis/i],
+    force: 'get_racquets_with_specs', hintArgs: { sport: 'tennis' } },
+  { intent: 'order_status',
+    rx: [/order\s*(id|number|#)?\s*[:#]?\s*\d{3,}/i, /track.*order/i, /where.*order/i, /my\s+order/i],
+    force: 'get_order_by_id' },
+  { intent: 'return_policy',
+    rx: [/return\s*policy/i, /refund/i, /exchange\s+policy/i, /return.*product/i],
+    force: null },
+  { intent: 'shipping_policy',
+    rx: [/shipping/i, /delivery\s+time/i, /when.*deliver/i, /courier/i],
+    force: null },
+  { intent: 'greeting',
+    rx: [/^\s*(hi|hello|hey|namaste|good\s*(morning|evening|afternoon))\s*[!.?]?\s*$/i],
+    force: null }
+];
+
+function classifyIntent(userText) {
+  const text = String(userText || '');
+  const results = [];
+  for (const rule of INTENT_RULES) {
+    let score = 0;
+    for (const r of rule.rx) if (r.test(text)) score += 1;
+    if (score > 0) results.push({ intent: rule.intent, score, force: rule.force, hintArgs: rule.hintArgs || {} });
+  }
+  results.sort((a, b) => b.score - a.score);
+  const top = results[0] || null;
+
+  // Simple entity extraction
+  const entities = {};
+  const priceMatch = text.match(/(?:under|below|<=?|less than)\s*₹?\s*(\d[\d,]*)/i);
+  if (priceMatch) entities.max_price = parseInt(priceMatch[1].replace(/,/g, ''), 10);
+  const priceMatch2 = text.match(/(?:over|above|>=?|more than)\s*₹?\s*(\d[\d,]*)/i);
+  if (priceMatch2) entities.min_price = parseInt(priceMatch2[1].replace(/,/g, ''), 10);
+  const sizeMatch = text.match(/\bsize\s*(\d{1,2}(?:\.\d)?)/i) || text.match(/\b(uk|us|eu)\s*(\d{1,2}(?:\.\d)?)/i);
+  if (sizeMatch) entities.size = sizeMatch[sizeMatch.length - 1];
+  const orderMatch = text.match(/\b(\d{6,12})\b/);
+  if (orderMatch && /order|track/i.test(text)) entities.order_id = orderMatch[1];
+  const brands = ['wilson','babolat','head','yonex','prince','tecnifibre','dunlop','asics','nike','adidas','k-swiss','new balance','diadem','selkirk','joola','bullpadel','tenniix','bolt'];
+  for (const b of brands) if (new RegExp('\\b'+b.replace(/\s+/g,'\\s+')+'\\b', 'i').test(text)) { entities.brand = b; break; }
+
+  return { top, all: results, entities };
+}
+
+// Ring-buffer trace of last N chat turns for /api/debug/trace
+const TRACE = [];
+const TRACE_MAX = 50;
+function pushTrace(entry) {
+  TRACE.push({ ts: new Date().toISOString(), ...entry });
+  while (TRACE.length > TRACE_MAX) TRACE.shift();
+}
+
 // ==================== CHAT API ====================
 app.post('/api/chat', async (req, res) => {
   try {
@@ -1197,9 +1277,24 @@ app.post('/api/chat', async (req, res) => {
       };
     }
 
-    const apiMessages = sizeDirective
-      ? [{ role: 'system', content: SYSTEM_PROMPT }, sizeDirective, ...messages]
-      : [{ role: 'system', content: SYSTEM_PROMPT }, ...messages];
+    // Multi-agent pre-processor: classify intent BEFORE sending to LLM.
+    const classification = classifyIntent(lastUser);
+    const agentHint = classification.top ? {
+      role: 'system',
+      content: `INTENT DETECTED: ${classification.top.intent} (score=${classification.top.score}). ` +
+        (classification.top.force ? `You MUST call ${classification.top.force} first` +
+          (Object.keys(classification.top.hintArgs).length ? ` with ${JSON.stringify(classification.top.hintArgs)}` : '') + '.' :
+          'Answer from policy/knowledge if no tool fits.') +
+        (Object.keys(classification.entities).length ? ` Entities: ${JSON.stringify(classification.entities)}.` : '')
+    } : null;
+    // Promote intent force over size directive when both fire and intent is strong.
+    if (classification.top && classification.top.force && !forceToolChoice?.function) {
+      forceToolChoice = { type: 'function', function: { name: classification.top.force } };
+    }
+    const systemParts = [{ role: 'system', content: SYSTEM_PROMPT }];
+    if (sizeDirective) systemParts.push(sizeDirective);
+    if (agentHint) systemParts.push(agentHint);
+    const apiMessages = [...systemParts, ...messages];
 
     let response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
       model: OPENROUTER_MODEL,
@@ -1261,7 +1356,8 @@ app.post('/api/chat', async (req, res) => {
       assistantMessage = response.data.choices[0].message;
     }
 
-    res.json({ message: assistantMessage.content, usage: response.data.usage });
+    pushTrace({ user: lastUser, intent: classification?.top?.intent || null, entities: classification?.entities || {}, forced: forceToolChoice?.function?.name || null, iterations });
+    res.json({ message: assistantMessage.content, usage: response.data.usage, intent: classification?.top?.intent || null });
   } catch (error) {
     console.error('Chat API error:', error.response?.data || error.message);
     res.status(500).json({
@@ -1346,6 +1442,16 @@ app.post('/api/refresh', async (req, res) => {
   }
   await refreshCatalog('webhook');
   res.json({ ok: true, ...lastCatalogRefresh });
+});
+
+// ==================== DEBUG TRACE (v4.7.0) ====================
+app.get('/api/debug/trace', (req, res) => {
+  res.json({ count: TRACE.length, trace: TRACE.slice().reverse() });
+});
+
+app.get('/api/debug/classify', (req, res) => {
+  const q = String(req.query.q || '');
+  res.json({ query: q, ...classifyIntent(q) });
 });
 
 // ==================== HEALTH ====================
