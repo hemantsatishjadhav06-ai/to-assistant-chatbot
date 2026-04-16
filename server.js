@@ -40,7 +40,7 @@ const MAGENTO_STORE_URL = process.env.MAGENTO_STORE_URL || 'https://tennisoutlet
 
 // ==================== MULTI-STORE CONFIG (v5.0) ====================
 // Each sport maps to its own storefront URL and (optionally) its own Magento backend.
-// For now all 3 stores share a single Magento instance Ã¢ÂÂ when you split backends,
+// For now all 3 stores share a single Magento instance ÃÂ¢ÃÂÃÂ when you split backends,
 // just set the env vars (e.g. MAGENTO_PADEL_BASE_URL, MAGENTO_PICKLEBALL_BASE_URL).
 const STORE_CONFIG = {
   tennis: {
@@ -122,10 +122,10 @@ PRODUCTS:
 - Buying Guide: https://tennisoutlet.in/buying-guide
 - Pre-strung racquets typically strung at 55-56 tension.
 
-PRODUCT PRESENTATION RULES (MANDATORY Ã¢ÂÂ NEVER SKIP):
+PRODUCT PRESENTATION RULES (MANDATORY ÃÂ¢ÃÂÃÂ NEVER SKIP):
 - Return AT LEAST 4-5 products whenever the catalog has them.
 - EVERY product MUST be a clickable markdown link using the product_url field from the tool response. This is the #1 most important rule.
-- Use this EXACT markdown format Ã¢ÂÂ the UI renders it as clickable links:
+- Use this EXACT markdown format ÃÂ¢ÃÂÃÂ the UI renders it as clickable links:
 
 1. **[Product Name](https://SPORT-STORE-URL/actual-product-slug.html)**
    Price: \u20B9X,XXX
@@ -134,7 +134,7 @@ PRODUCT PRESENTATION RULES (MANDATORY Ã¢ÂÂ NEVER SKIP):
 - The product_url is already in every product object the tool returns. Copy it exactly into the markdown link parentheses. The URL already points to the correct store (tennisoutlet.in, pickleballoutlet.in, or padeloutlet.in) based on the sport. Example: if the tool returns product_url: "https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html", write: **[Joola Hyperion Vision 16 mm - Storm Blue](https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html)**
 - If you list a product WITHOUT a clickable link, the response is BROKEN and unusable. Always include the link.
 - NEVER show quantity/stock numbers to the customer.
-- ONLY recommend products where in_stock is true. If a product has in_stock: false or qty: 0, SKIP it entirely Ã¢ÂÂ do not mention it.
+- ONLY recommend products where in_stock is true. If a product has in_stock: false or qty: 0, SKIP it entirely ÃÂ¢ÃÂÃÂ do not mention it.
 - NEVER use markdown images ![]().
 - NEVER add target="_blank" or raw HTML attributes in your text.
 - The tool returns products sorted highest-qty first. Feature the FIRST product prominently as the recommended upsell pick.
@@ -157,7 +157,7 @@ ROUTING RULES (STRICT - follow these exactly):
 - ACCESSORIES -> get_products_by_category (37).
 - USED racquets -> get_products_by_category (90).
 - Sale/Wimbledon/Grand Slam offers -> get_products_by_category (292/349/437).
-- RACQUET UPGRADE / TRADE-IN / SELL OLD RACQUET -> Direct customer to: https://tennisoutlet.in/racquet-upgrade-program Ã¢ÂÂ we purchase customer's old racquets through our Racquet Upgrade Program.
+- RACQUET UPGRADE / TRADE-IN / SELL OLD RACQUET -> Direct customer to: https://tennisoutlet.in/racquet-upgrade-program ÃÂ¢ÃÂÃÂ we purchase customer's old racquets through our Racquet Upgrade Program.
 - FALLBACK: If no rule above matches the product type, call search_products with the customer's keywords. NEVER refuse a product query without trying at least one Magento tool.
 
 SMART GUIDELINES:
@@ -165,16 +165,16 @@ SMART GUIDELINES:
 - Brand-specific racquet -> get_racquets_with_specs({brand:"Babolat"|"Head"|"Wilson"|"YONEX"|"Prince"...}).
 - Expensive items -> mention WELCOME10 coupon (10% off up to \u20B9300) for first-time buyers.
 - Cross-sell: racquet -> suggest strings/bags/shoes.
-- When recommending new racquets, mention the Racquet Upgrade Program (https://tennisoutlet.in/racquet-upgrade-program) Ã¢ÂÂ customers can trade in their old racquet.
+- When recommending new racquets, mention the Racquet Upgrade Program (https://tennisoutlet.in/racquet-upgrade-program) ÃÂ¢ÃÂÃÂ customers can trade in their old racquet.
 
 SIZE / SIZE-SPECIFIC REQUESTS (IMPORTANT):
-- Shoe sizes (UK/US/EU) and apparel sizes are VARIANTS selected on each product page Ã¢ÂÂ they are NOT separate products and NOT in product names.
+- Shoe sizes (UK/US/EU) and apparel sizes are VARIANTS selected on each product page ÃÂ¢ÃÂÃÂ they are NOT separate products and NOT in product names.
 - NEVER tell the customer "we don't have size X" or "no shoes in size X". Sizes are available on each product page.
 - For shoe queries WITH a size: call get_shoes_with_specs with the size parameter. The tool will try to find exact size matches, and if none, will automatically fall back to showing all available shoes with a note about size selection.
 - For shoe queries WITHOUT a size: call get_shoes_with_specs normally, show 4-5 products.
 - ALWAYS show shoes with clickable links. After the list, add: "All sizes (including size X) can be selected on each product page. If a specific size is sold out, it will be marked on that page."
 - If the customer says "sports shoes" or just "shoes" without specifying tennis/pickleball/padel, pass sport="all" to get_shoes_with_specs to search across all stores.
-- Same rule for grip size on racquets, apparel sizes (S/M/L/XL), string tension, etc. Ã¢ÂÂ show the category, tell the user where to pick the variant on the product page.
+- Same rule for grip size on racquets, apparel sizes (S/M/L/XL), string tension, etc. ÃÂ¢ÃÂÃÂ show the category, tell the user where to pick the variant on the product page.
 
 PAYMENT:
 - Cards, Net Banking, UPI, EMI, COD. EMI: "coming within a week".
@@ -190,7 +190,7 @@ BOUNDARIES:
 - Stay strictly within TennisOutlet / PickleballOutlet / PadelOutlet scope.
 - We do NOT carry New Balance - recommend alternatives.
 
-Use the sport-specific store URL for all product links: Tennis=https://tennisoutlet.in, Pickleball=https://pickleballoutlet.in, Padel=https://padeloutlet.in. The tool already returns the correct product_url Ã¢ÂÂ just use it.`;
+Use the sport-specific store URL for all product links: Tennis=https://tennisoutlet.in, Pickleball=https://pickleballoutlet.in, Padel=https://padeloutlet.in. The tool already returns the correct product_url ÃÂ¢ÃÂÃÂ just use it.`;
 
 // ==================== FUNCTION DEFINITIONS ====================
 const FUNCTION_DEFINITIONS = [
@@ -237,11 +237,11 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
     type: "function",
     function: {
       name: "get_shoes_with_specs",
-      description: "Return shoes from TennisOutlet with FULL resolved specs. Use this for ANY shoe query including brand, size availability, price caps, or spec filtering. All filters optional and AND-combined. Size filter checks child SKU stock Ã¢ÂÂ if the requested size is out of stock the product is excluded.",
+      description: "Return shoes from TennisOutlet with FULL resolved specs. Use this for ANY shoe query including brand, size availability, price caps, or spec filtering. All filters optional and AND-combined. Size filter checks child SKU stock ÃÂ¢ÃÂÃÂ if the requested size is out of stock the product is excluded.",
       parameters: {
         type: "object",
         properties: {
-          sport: { type: "string", enum: ["tennis", "pickleball", "padel"], default: "tennis" },
+          sport: { type: "string", enum: ["tennis", "pickleball", "padel", "all"], default: "all" },
           brand: { type: "string", description: "Brand name like 'ASICS', 'Nike', 'Adidas'. Optional." },
           shoe_type: { type: "string", description: "Men's / Women's / Kid's. Optional." },
           court_type: { type: "string", description: "All Court / Clay Court / Hard Court / Padel Court / Pickleball Court. Optional." },
@@ -286,7 +286,7 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
     type: "function",
     function: {
       name: "get_ball_machines",
-      description: "Return ALL ball-machine-type products (ball machines, throwers, cannons, launchers, feeders) from TennisOutlet.in with product links. Combines category lookup (discovered from Magento category tree at startup), free-text search across name/sku/url_key, and slug matching. Use this for ANY ball machine / ball thrower / ball cannon query Ã¢ÂÂ do NOT use get_products_by_category or search_products for these, because ball machines are not in the standard category IDs.",
+      description: "Return ALL ball-machine-type products (ball machines, throwers, cannons, launchers, feeders) from TennisOutlet.in with product links. Combines category lookup (discovered from Magento category tree at startup), free-text search across name/sku/url_key, and slug matching. Use this for ANY ball machine / ball thrower / ball cannon query ÃÂ¢ÃÂÃÂ do NOT use get_products_by_category or search_products for these, because ball machines are not in the standard category IDs.",
       parameters: {
         type: "object",
         properties: {
@@ -379,14 +379,14 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
 
 // Build product URL: prefer url_key, else derive from name; drop trailing SKU-like suffixes; ensure .html
 // ==================== PRODUCT URL (v5.3.0) ====================
-// Uses Magento's own url_rewrites table via extension_attributes Ã¢ÂÂ the exact URL
+// Uses Magento's own url_rewrites table via extension_attributes ÃÂ¢ÃÂÃÂ the exact URL
 // the storefront links to. Falls back to url_key + .html, then to the ID-based
 // /catalog/product/view/id/ path which is guaranteed to resolve on every M2 install.
 function buildProductUrl(item, sport = 'tennis') {
   const storeUrl = getStoreUrl(sport);
   const attrs = (item.custom_attributes || []).reduce((a, c) => { a[c.attribute_code] = c.value; return a; }, {});
 
-  // 1st choice: Magento's url_rewrites Ã¢ÂÂ the authoritative storefront URL.
+  // 1st choice: Magento's url_rewrites ÃÂ¢ÃÂÃÂ the authoritative storefront URL.
   // Requires the /products query to request `extension_attributes[url_rewrites]`.
   const rewrites = item.extension_attributes?.url_rewrites;
   if (Array.isArray(rewrites) && rewrites.length > 0) {
@@ -397,13 +397,13 @@ function buildProductUrl(item, sport = 'tennis') {
     }
   }
 
-  // 2nd choice: url_key + .html Ã¢ÂÂ works on stores with flat URL rewrites.
+  // 2nd choice: url_key + .html ÃÂ¢ÃÂÃÂ works on stores with flat URL rewrites.
   if (attrs.url_key) {
     const clean = String(attrs.url_key).replace(/\.html?$/i, '').replace(/^-|-$/g, '');
     if (clean) return `${storeUrl}/${clean}.html`;
   }
 
-  // 3rd choice: ID-based URL Ã¢ÂÂ guaranteed to 200 on every Magento install,
+  // 3rd choice: ID-based URL ÃÂ¢ÃÂÃÂ guaranteed to 200 on every Magento install,
   // regardless of SEO config. Magento will 301 to the canonical URL.
   if (item.id) {
     return `${storeUrl}/catalog/product/view/id/${item.id}`;
@@ -420,10 +420,10 @@ function extractCustomAttrs(item) {
 }
 
 // ==================== CATEGORY INDEX (v5.4.0) ====================
-// CATEGORY_MAP = flat list; CATEGORY_INDEX = inverted keywordÃ¢ÂÂ[{id,name,score}] for O(1) resolution.
+// CATEGORY_MAP = flat list; CATEGORY_INDEX = inverted keywordÃÂ¢ÃÂÃÂ[{id,name,score}] for O(1) resolution.
 let CATEGORY_MAP = [];
 const BALL_MACHINE_CATEGORY_IDS = [];
-let CATEGORY_INDEX = {};  // keyword Ã¢ÂÂ [{ id, name, score }]
+let CATEGORY_INDEX = {};  // keyword ÃÂ¢ÃÂÃÂ [{ id, name, score }]
 
 // Build the inverted index from the flat category list.
 function buildCategoryIndex(cats) {
@@ -464,7 +464,7 @@ function resolveCategoriesFromQuery(query, maxResults = 3) {
   if (queryTokens.length === 0) return [];
 
   // Score each category by how many query tokens it matches
-  const catScores = {};  // catId Ã¢ÂÂ { ...catInfo, matchCount, totalScore }
+  const catScores = {};  // catId ÃÂ¢ÃÂÃÂ { ...catInfo, matchCount, totalScore }
 
   // Try bigrams first (more specific)
   for (let i = 0; i < queryTokens.length - 1; i++) {
@@ -521,7 +521,7 @@ async function initCategoryMap() {
     walk(res.data);
     CATEGORY_MAP = flat;
 
-    // Build inverted index for O(1) queryÃ¢ÂÂcategory resolution
+    // Build inverted index for O(1) queryÃÂ¢ÃÂÃÂcategory resolution
     CATEGORY_INDEX = buildCategoryIndex(flat);
     console.log(`[category-index] loaded ${flat.length} categories, ${Object.keys(CATEGORY_INDEX).length} index keys`);
 
@@ -606,7 +606,7 @@ async function magentoGet(endpoint, params = {}) {
       'Accept': 'application/json'
     },
     params,
-    timeout: 10000   // v5.7.2: balanced Ã¢ÂÂ generous but fits Render 30s
+    timeout: 10000   // v5.7.2: balanced ÃÂ¢ÃÂÃÂ generous but fits Render 30s
   });
   return response.data;
 }
@@ -727,10 +727,10 @@ async function getOrderStatus(orderId) {
 }
 
 // ==================== STOCK RESOLUTION (v5.3.0) ====================
-// Uses Magento 2's canonical condition_type=in filter Ã¢ÂÂ the same idiom Magento's
+// Uses Magento 2's canonical condition_type=in filter ÃÂ¢ÃÂÃÂ the same idiom Magento's
 // own SearchCriteriaBuilder emits. Previous versions chained N eq-filters which
 // triggers undefined behavior in M2 REST (silently returns empty or partial results).
-// Works on MSI, legacy cataloginventory, single-source, multi-source Ã¢ÂÂ every variant.
+// Works on MSI, legacy cataloginventory, single-source, multi-source ÃÂ¢ÃÂÃÂ every variant.
 // Returns: { [sku]: qty } where qty >= 1 means "customer can buy this right now".
 async function fetchStockMap(skus) {
   const map = {};
@@ -740,7 +740,7 @@ async function fetchStockMap(skus) {
   const uniqueSkus = [...new Set(skus.filter(s => s && typeof s === 'string'))];
   if (uniqueSkus.length === 0) return map;
 
-  // Batch into groups of 40 Ã¢ÂÂ stays under URL length limits on every Magento install.
+  // Batch into groups of 40 ÃÂ¢ÃÂÃÂ stays under URL length limits on every Magento install.
   const BATCH_SIZE = 40;
   const batches = [];
   for (let i = 0; i < uniqueSkus.length; i += BATCH_SIZE) {
@@ -797,7 +797,7 @@ async function fetchStockMap(skus) {
   // which works on both. This is Magento's own storefront check.
   const allZero = uniqueSkus.every(s => !map[s] || map[s] === 0);
   if (allZero) {
-    console.log(`[stockMap] MSI empty Ã¢ÂÂ falling back to /stockItems for ${uniqueSkus.length} SKUs`);
+    console.log(`[stockMap] MSI empty ÃÂ¢ÃÂÃÂ falling back to /stockItems for ${uniqueSkus.length} SKUs`);
     const CAP = 50;
     const subset = uniqueSkus.slice(0, CAP);
     await Promise.all(subset.map(async (sku) => {
@@ -872,7 +872,7 @@ function shapeProduct(item, qty, sport = 'tennis') {
 // STRICT availability check (v5.2.0):
 // Simple products: qty >= 1.
 // Configurable products: children must have been loaded AND summed qty >= 1.
-// No fake-available fallback Ã¢ÂÂ we'd rather show fewer real products than dead links.
+// No fake-available fallback ÃÂ¢ÃÂÃÂ we'd rather show fewer real products than dead links.
 function isProductAvailable(p) {
   if (!p) return false;
   if (p.type_id === 'configurable') {
@@ -883,7 +883,7 @@ function isProductAvailable(p) {
   return (p.qty || 0) >= 1;
 }
 
-// applyFallbackStock removed in v5.2.0 Ã¢ÂÂ was creating false-positives on timed-out
+// applyFallbackStock removed in v5.2.0 ÃÂ¢ÃÂÃÂ was creating false-positives on timed-out
 // enrichment. Replacement strategy: tighter enrichment concurrency + cap (see CHANGE 4).
 
 async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
@@ -896,7 +896,7 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
       'searchCriteria[filter_groups][1][filters][0][value]': 1,
       'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
       'searchCriteria[filter_groups][2][filters][0][value]': 4,
-      // NOTE: removed quantity_and_stock_status pre-filter Ã¢ÂÂ unreliable on MSI for configurables.
+      // NOTE: removed quantity_and_stock_status pre-filter ÃÂ¢ÃÂÃÂ unreliable on MSI for configurables.
       // Real stock verification happens downstream via fetchStockMap + enrichConfigurables.
       'searchCriteria[pageSize]': Math.min(fetchSize, 100),
       'searchCriteria[sortOrders][0][field]': 'created_at',
@@ -953,7 +953,7 @@ function buildSearchParams(pattern, pageSize) {
     // AND visibility=4 (catalog+search)
     'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
     'searchCriteria[filter_groups][2][filters][0][value]': 4,
-    // NOTE: removed quantity_and_stock_status pre-filter Ã¢ÂÂ stock verified downstream.
+    // NOTE: removed quantity_and_stock_status pre-filter ÃÂ¢ÃÂÃÂ stock verified downstream.
     'searchCriteria[pageSize]': Math.min(pageSize, 100),
     'searchCriteria[sortOrders][0][field]': 'name',
     'searchCriteria[sortOrders][0][direction]': 'ASC',
@@ -1030,10 +1030,15 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const catId = SHOE_CATEGORIES[sportKey] || 24;
     const filters = [];
     let idx = 0;
-    filters.push({ group: idx++, field: 'category_id', value: '274,253,24', conditionType: 'in' });
+    if (String(sport).toLowerCase() === 'all') {
+      filters.push({ group: idx++, field: 'category_id', value: '274,253,24', conditionType: 'in' });
+    } else {
+      const catId = SHOE_CATEGORIES[String(sport).toLowerCase()] || 24;
+      filters.push({ group: idx++, field: 'category_id', value: String(catId) });
+    }
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
-    // NOTE: removed quantity_and_stock_status Ã¢ÂÂ stock verified via fetchStockMap + enrichConfigurables.
+    // NOTE: removed quantity_and_stock_status ÃÂ¢ÃÂÃÂ stock verified via fetchStockMap + enrichConfigurables.
 
     if (brand) {
       const bid = brandNameToId(brand);
@@ -1066,7 +1071,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-    // v5.7.0: Enrich all configurables Ã¢ÂÂ no time caps, correctness first
+    // v5.7.0: Enrich all configurables ÃÂ¢ÃÂÃÂ no time caps, correctness first
     await enrichConfigurables(shaped, true);
 
     const inStock = shaped.filter(isProductAvailable);
@@ -1083,15 +1088,15 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       const fallback = applyPriceSizeFilters(inStock, { min_price, max_price, size: null });
       let fallbackAvail = stripInternals(fallback.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
       if (fallbackAvail.length > 0) {
-        message = `I couldn't confirm size ${size} stock for ${sport} shoes right now. Showing available ${sport} shoes Ã¢ÂÂ please select size ${size} on each product page to see if it's in stock.`;
+        message = `I couldn't confirm size ${size} stock for ${sport} shoes right now. Showing available ${sport} shoes ÃÂ¢ÃÂÃÂ please select size ${size} on each product page to see if it's in stock.`;
         return {
           sport, filters_applied: { brand, shoe_type, court_type, width, cushioning, size: null, min_price, max_price },
           products: fallbackAvail, total: result.total_count, showing: fallbackAvail.length,
-          filtered_out: 0, message, size_note: `Size ${size} availability varies per product Ã¢ÂÂ check the size dropdown on each PDP`
+          filtered_out: 0, message, size_note: `Size ${size} availability varies per product ÃÂ¢ÃÂÃÂ check the size dropdown on each PDP`
         };
       }
     }
-    // v5.7.3: Price fallback â if price filter gave 0 results, show closest by price
+    // v5.7.3: Price fallback Ã¢ÂÂ if price filter gave 0 results, show closest by price
     if (available.length === 0 && (min_price || max_price) && beforeCustomer > 0) {
       const mid = (min_price && max_price) ? (min_price + max_price) / 2
                 : max_price ? max_price * 0.8
@@ -1152,7 +1157,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     }
 
     // v5.7.0: Fetch a large pool (up to 50) so we have enough after enrichment + price filter.
-    // Configurable parents have price=0 in Magento Ã¢ÂÂ real prices come from enrichConfigurables.
+    // Configurable parents have price=0 in Magento ÃÂ¢ÃÂÃÂ real prices come from enrichConfigurables.
     // We MUST over-fetch to ensure we find products in the requested price range.
     const fetchSize = Math.min(Math.max(page_size * 3, 20), 30);  // v5.7.2: fetch 20-30
     const params = {
@@ -1174,7 +1179,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const stockMap = await fetchStockMap(skus);
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
 
-    // v5.7.0: Enrich ALL configurables Ã¢ÂÂ this is critical for correct pricing.
+    // v5.7.0: Enrich ALL configurables ÃÂ¢ÃÂÃÂ this is critical for correct pricing.
     // Configurable parents store price=0; child enrichment reveals real prices.
     await enrichConfigurables(shaped);
 
@@ -1197,9 +1202,9 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
       const sorted = inStock.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
       available = stripInternals(sorted.slice(0, Math.min(page_size, 20)));
       const bits = [];
-      if (min_price) bits.push(`above Ã¢ÂÂ¹${Number(min_price).toLocaleString('en-IN')}`);
-      if (max_price) bits.push(`under Ã¢ÂÂ¹${Number(max_price).toLocaleString('en-IN')}`);
-      message = `No exact matches in the ${bits.join(' and ')} range. Showing the closest available ${sport} racquets by price. The customer asked for ${bits.join(' and ')} Ã¢ÂÂ highlight any that are close and mention the actual prices clearly.`;
+      if (min_price) bits.push(`above ÃÂ¢ÃÂÃÂ¹${Number(min_price).toLocaleString('en-IN')}`);
+      if (max_price) bits.push(`under ÃÂ¢ÃÂÃÂ¹${Number(max_price).toLocaleString('en-IN')}`);
+      message = `No exact matches in the ${bits.join(' and ')} range. Showing the closest available ${sport} racquets by price. The customer asked for ${bits.join(' and ')} ÃÂ¢ÃÂÃÂ highlight any that are close and mention the actual prices clearly.`;
     } else {
       available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
     }
@@ -1219,16 +1224,16 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
 // After this runs, p.price / p.price_max / p.qty reflect the child aggregate, and
 // p._children holds per-child {sku, price, qty, size} for downstream size/price filtering.
 async function enrichConfigurables(products, forceAll = true) {
-  // forceAll=true by default Ã¢ÂÂ we MUST verify child stock for every configurable product.
+  // forceAll=true by default ÃÂ¢ÃÂÃÂ we MUST verify child stock for every configurable product.
   // v5.2.0: quantity_and_stock_status removed; enrichment is the sole stock gate.
   const targets = forceAll
     ? products.filter(p => p != null)
     : products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
-  // dropped enrichments mean dropped products Ã¢ÂÂ so we must enrich more, faster.
-  const CAP = 5;        // v5.7.2: 5 products enriched, all parallel Ã¢ÂÂ fits Render 30s
-  const CONCURRENCY = 5; // v5.7.2: all 5 in parallel = single round Ã¢ÂÂ 3-5s
+  // dropped enrichments mean dropped products ÃÂ¢ÃÂÃÂ so we must enrich more, faster.
+  const CAP = 5;        // v5.7.2: 5 products enriched, all parallel ÃÂ¢ÃÂÃÂ fits Render 30s
+  const CONCURRENCY = 5; // v5.7.2: all 5 in parallel = single round ÃÂ¢ÃÂÃÂ 3-5s
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1277,7 +1282,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 5000); }  // v5.7.2: 5s per item Ã¢ÂÂ balanced
+        try { await withTimeout(enrichOne(item), 5000); }  // v5.7.2: 5s per item ÃÂ¢ÃÂÃÂ balanced
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
@@ -1310,7 +1315,7 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
 }
 
 // Strip internal-only fields + HARD stock gate before returning to the LLM.
-// v5.2.0: returns a NEW array filtered by qty >= 1 Ã¢ÂÂ no zero-qty product can escape.
+// v5.2.0: returns a NEW array filtered by qty >= 1 ÃÂ¢ÃÂÃÂ no zero-qty product can escape.
 function stripInternals(products) {
   return (products || []).filter(p => {
     if (!p) return false;
@@ -1333,7 +1338,7 @@ function listBrands() {
 }
 
 // ==================== BALL MACHINES (v3.3.2) ====================
-// Combines three strategies (category Ã¢ÂÂ search tokens Ã¢ÂÂ url_key LIKE) and
+// Combines three strategies (category ÃÂ¢ÃÂÃÂ search tokens ÃÂ¢ÃÂÃÂ url_key LIKE) and
 // unions the results, so we return every ball-machine-shaped product the
 // catalog has, even if a category wasn't indexed or the search stopped short.
 async function getBallMachines({ page_size = 10, min_price = null, max_price = null, sport = 'tennis' } = {}) {
@@ -1350,7 +1355,7 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
       'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
       'searchCriteria[filter_groups][1][filters][0][field]': 'status',
       'searchCriteria[filter_groups][1][filters][0][value]': 1,
-      // NOTE: removed quantity_and_stock_status Ã¢ÂÂ stock verified downstream.
+      // NOTE: removed quantity_and_stock_status ÃÂ¢ÃÂÃÂ stock verified downstream.
       'searchCriteria[pageSize]': 20
     };
     const result = await magentoGet('/products', params);
@@ -1358,12 +1363,12 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
       const skus = result.items.map(i => i.sku);
       const stockMap = await fetchStockMap(skus);
       const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-      // These are simple products Ã¢ÂÂ enrichConfigurables is a no-op, skip it to save time.
+      // These are simple products ÃÂ¢ÃÂÃÂ enrichConfigurables is a no-op, skip it to save time.
       for (const p of shaped) if (!seen.has(p.sku)) seen.set(p.sku, p);
     }
   };
 
-  // === FAST PATH: sequential, lightweight Ã¢ÂÂ catches the known ball-machine products ===
+  // === FAST PATH: sequential, lightweight ÃÂ¢ÃÂÃÂ catches the known ball-machine products ===
   const fastQueries = [
     ['name', '%ball machine%'],
     ['name', '%tenniix%'],
@@ -1486,7 +1491,7 @@ async function getProductReviews({ sku = null, query = null, page_size = 5 } = {
       endpoint_error: endpointError,
       review_page_hint: product?.product_url ? `${product.product_url}#reviews` : null,
       message: reviews.length === 0
-        ? `No reviews fetched from the API${endpointError ? ` (${endpointError})` : ''}. Customer reviews appear on the product page itself Ã¢ÂÂ direct the user to click the product link and scroll to the 'Customer Reviews' section.`
+        ? `No reviews fetched from the API${endpointError ? ` (${endpointError})` : ''}. Customer reviews appear on the product page itself ÃÂ¢ÃÂÃÂ direct the user to click the product link and scroll to the 'Customer Reviews' section.`
         : null
     };
   } catch (e) {
@@ -1604,7 +1609,7 @@ async function executeFunction(name, args, sport = 'tennis') {
 //   (a) force the right tool call when confidence is high (avoids LLM routing errors)
 //   (b) inject structured hints into the system prompt
 //   (c) catch specific product queries the LLM tends to phrase poorly to the API
-// No extra LLM round-trip Ã¢ÂÂ pure regex/keyword scoring, so latency stays flat.
+// No extra LLM round-trip ÃÂ¢ÃÂÃÂ pure regex/keyword scoring, so latency stays flat.
 const INTENT_RULES = [
   // intent,            patterns (match any),                                     forceTool,                                        hint
   { intent: 'shoe',
@@ -1649,9 +1654,9 @@ function classifyIntent(userText) {
 
   // Simple entity extraction
   const entities = {};
-  const priceMatch = text.match(/(?:under|below|<=?|less than)\s*Ã¢ÂÂ¹?\s*(\d[\d,]*)/i);
+  const priceMatch = text.match(/(?:under|below|<=?|less than)\s*ÃÂ¢ÃÂÃÂ¹?\s*(\d[\d,]*)/i);
   if (priceMatch) entities.max_price = parseInt(priceMatch[1].replace(/,/g, ''), 10);
-  const priceMatch2 = text.match(/(?:over|above|>=?|more than)\s*Ã¢ÂÂ¹?\s*(\d[\d,]*)/i);
+  const priceMatch2 = text.match(/(?:over|above|>=?|more than)\s*ÃÂ¢ÃÂÃÂ¹?\s*(\d[\d,]*)/i);
   if (priceMatch2) entities.min_price = parseInt(priceMatch2[1].replace(/,/g, ''), 10);
   const sizeMatch = text.match(/\bsize\s*(\d{1,2}(?:\.\d)?)/i) || text.match(/\b(uk|us|eu)\s*(\d{1,2}(?:\.\d)?)/i);
   if (sizeMatch) entities.size = sizeMatch[sizeMatch.length - 1];
@@ -1753,7 +1758,7 @@ app.post('/api/chat', async (req, res) => {
         const funcName = toolCall.function.name;
         let funcArgs = {};
         try { funcArgs = JSON.parse(toolCall.function.arguments); } catch {}
-        // Override LLM args with deterministic hintArgs from INTENT_RULES (e.g. paddleballÃ¢ÂÂpickleball)
+        // Override LLM args with deterministic hintArgs from INTENT_RULES (e.g. paddleballÃÂ¢ÃÂÃÂpickleball)
         if (classification.top && classification.top.hintArgs && classification.top.force === funcName) {
           Object.assign(funcArgs, classification.top.hintArgs);
         }
@@ -1840,10 +1845,10 @@ app.post('/api/chat-agents', async (req, res) => {
         merged._normalizer_spec = normResult.spec;
       }
     } else {
-      console.log(`[normalizer] skipped Ã¢ÂÂ parser already has intent_hint=${merged.intent_hint}`);
+      console.log(`[normalizer] skipped ÃÂ¢ÃÂÃÂ parser already has intent_hint=${merged.intent_hint}`);
     }
 
-    // v5.5.0 + v5.6.0: Follow-up detection Ã¢ÂÂ prefer normalizer's is_follow_up flag.
+    // v5.5.0 + v5.6.0: Follow-up detection ÃÂ¢ÃÂÃÂ prefer normalizer's is_follow_up flag.
     const followUp = slotParser.detectFollowUp(lastUser);
     let followUpHint = '';
     const lastIntent = sessionStore.getLastIntent(sessionId);
@@ -1855,10 +1860,10 @@ app.post('/api/chat-agents', async (req, res) => {
 
     if (isFollowUpDetected) {
       const refinementType = normResult.spec?.refinement_type || followUp?.type || 'more';
-      followUpHint = `Follow-up refinement detected: ${refinementType}. Customer wants to refine/continue the PREVIOUS search Ã¢ÂÂ stay in the same product domain.`;
+      followUpHint = `Follow-up refinement detected: ${refinementType}. Customer wants to refine/continue the PREVIOUS search ÃÂ¢ÃÂÃÂ stay in the same product domain.`;
       if (lastIntent && !merged.intent_hint) {
         merged.intent_hint = lastIntent;
-        console.log(`[session:${sessionId}] follow-up "${refinementType}" Ã¢ÂÂ inheriting intent=${lastIntent}`);
+        console.log(`[session:${sessionId}] follow-up "${refinementType}" ÃÂ¢ÃÂÃÂ inheriting intent=${lastIntent}`);
       }
       if (merged.quantity) {
         merged._page_size = merged.quantity;
@@ -1883,7 +1888,7 @@ app.post('/api/chat-agents', async (req, res) => {
         /\b(order|status|track|tracking|dispatch|shipment|delivery|where is)\b/i.test(lastUser)) {
       merged.intent_hint = 'order';
       merged._rendered = slotParser.renderSlotsHint(merged);
-      console.log(`[session:${sessionId}] forced order intent Ã¢ÂÂ order_id=${merged.order_id} from session`);
+      console.log(`[session:${sessionId}] forced order intent ÃÂ¢ÃÂÃÂ order_id=${merged.order_id} from session`);
     }
 
     // ===== v4.8: Server-side conversation memory =====
@@ -1894,10 +1899,10 @@ app.post('/api/chat-agents', async (req, res) => {
     let fullMessages;
 
     if (messages.length <= 2) {
-      // Client sent only latest turn(s) Ã¢ÂÂ prepend server-side history
+      // Client sent only latest turn(s) ÃÂ¢ÃÂÃÂ prepend server-side history
       fullMessages = [...serverHistory, ...messages];
     } else {
-      // Client sent full history Ã¢ÂÂ use it and sync to server
+      // Client sent full history ÃÂ¢ÃÂÃÂ use it and sync to server
       fullMessages = messages;
       sessionStore.setHistory(sessionId, messages.filter(m => m.role !== 'system'));
     }
@@ -1907,7 +1912,7 @@ app.post('/api/chat-agents', async (req, res) => {
       sessionStore.addMessage(sessionId, 'user', lastUser);
     }
 
-    // Humanized session hint for the LLM â includes slot context + brief conversation summary
+    // Humanized session hint for the LLM Ã¢ÂÂ includes slot context + brief conversation summary
     const turns = sessionStore.get(sessionId).turns || 0;
     let sessionHint = '';
     if (turns > 1) {
@@ -1948,10 +1953,10 @@ app.post('/api/chat-agents', async (req, res) => {
     if (merged.max_price != null) specBits.push(`max_price=${merged.max_price}`);
     if (merged._page_size) specBits.push(`page_size=${merged._page_size}`);
     const enrichedSessionHint = specBits.length
-      ? `${sessionHint || ''} [NORMALIZED SPEC Ã¢ÂÂ USE THESE VALUES VERBATIM] ${specBits.join(', ')}`
+      ? `${sessionHint || ''} [NORMALIZED SPEC ÃÂ¢ÃÂÃÂ USE THESE VALUES VERBATIM] ${specBits.join(', ')}`
       : sessionHint;
 
-    // v5.7.0: NO deadline Ã¢ÂÂ let the pipeline complete naturally.
+    // v5.7.0: NO deadline ÃÂ¢ÃÂÃÂ let the pipeline complete naturally.
     // Correctness > speed. The LLM + Magento will take as long as they need.
     const result = await masterHandle({
       userMessages: fullMessages,
@@ -1989,12 +1994,12 @@ app.post('/api/chat-agents', async (req, res) => {
   } catch (error) {
     console.error('Multi-agent error:', error.response?.data || error.message);
     // v5.5.0: Return 200 with a friendly message instead of 500 so the chat UI
-    // stays alive. Session history is untouched Ã¢ÂÂ next turn resumes cleanly.
+    // stays alive. Session history is untouched ÃÂ¢ÃÂÃÂ next turn resumes cleanly.
     const errSessionId = sessionStore.fallbackId(req);
     const isTimeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || /timeout/i.test(error.message || '');
     const friendlyMessage = isTimeout
       ? "Sorry, that took longer than usual. Could you send your last message once more? Your conversation context is saved so I'll pick up right where we left off."
-      : "I hit a snag on that one Ã¢ÂÂ please try sending your message again. Everything we discussed is still in memory.";
+      : "I hit a snag on that one ÃÂ¢ÃÂÃÂ please try sending your message again. Everything we discussed is still in memory.";
     res.status(200).json({
       message: friendlyMessage,
       agent_trace: { error: true, reason: error.code || error.message, recoverable: true },
@@ -2042,7 +2047,7 @@ app.get('/api/debug/classify', (req, res) => {
 });
 
 // ==================== PRODUCT PROBE (v4.7.1) ====================
-// Direct Magento lookup that skips status/visibility filters Ã¢ÂÂ for diagnosing
+// Direct Magento lookup that skips status/visibility filters ÃÂ¢ÃÂÃÂ for diagnosing
 // missing products. Returns raw API response.
 app.get('/api/debug/probe', async (req, res) => {
   const q = String(req.query.q || 'tenniix');
