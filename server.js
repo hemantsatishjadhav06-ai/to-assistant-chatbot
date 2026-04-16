@@ -1846,7 +1846,11 @@ app.post('/api/chat-agents', async (req, res) => {
     const followUp = slotParser.detectFollowUp(lastUser);
     let followUpHint = '';
     const lastIntent = sessionStore.getLastIntent(sessionId);
-    const isFollowUpDetected = (normResult.spec?.is_follow_up) || !!followUp;
+    // v6.0.1: If normalizer confidently says this is a NEW topic (not follow-up),
+    // trust it over the regex detectFollowUp(). Fixes "Adidas Multigame Bag" being
+    // misrouted as a follow-up to the prior racquet query.
+    const normSaysNewTopic = normResult.ok && normResult.spec && !normResult.spec.is_follow_up && normResult.spec.confidence >= 0.7;
+    const isFollowUpDetected = normSaysNewTopic ? false : ((normResult.spec?.is_follow_up) || !!followUp);
 
     if (isFollowUpDetected) {
       const refinementType = normResult.spec?.refinement_type || followUp?.type || 'more';
