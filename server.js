@@ -37,6 +37,46 @@ const MAGENTO_REST = `${MAGENTO_ROOT}/rest/V1`;
 const MAGENTO_TOKEN = process.env.MAGENTO_TOKEN;
 const MAGENTO_STORE_URL = process.env.MAGENTO_STORE_URL || 'https://tennisoutlet.in';
 
+// ==================== MULTI-STORE CONFIG (v5.0) ====================
+// Each sport maps to its own storefront URL and (optionally) its own Magento backend.
+// For now all 3 stores share a single Magento instance — when you split backends,
+// just set the env vars (e.g. MAGENTO_PADEL_BASE_URL, MAGENTO_PICKLEBALL_BASE_URL).
+const STORE_CONFIG = {
+  tennis: {
+    name: 'TennisOutlet.in',
+    storeUrl: process.env.TENNIS_STORE_URL || 'https://tennisoutlet.in',
+    magentoRest: process.env.TENNIS_MAGENTO_REST || MAGENTO_REST,
+    magentoToken: process.env.TENNIS_MAGENTO_TOKEN || MAGENTO_TOKEN,
+    phone: '+91 9502517700',
+    emoji: '\u{1F3BE}'
+  },
+  padel: {
+    name: 'PadelOutlet.in',
+    storeUrl: process.env.PADEL_STORE_URL || 'https://padeloutlet.in',
+    magentoRest: process.env.PADEL_MAGENTO_REST || MAGENTO_REST,
+    magentoToken: process.env.PADEL_MAGENTO_TOKEN || MAGENTO_TOKEN,
+    phone: '+91 9502517700',
+    emoji: '\u{1F3BE}'
+  },
+  pickleball: {
+    name: 'PickleballOutlet.in',
+    storeUrl: process.env.PICKLEBALL_STORE_URL || 'https://pickleballoutlet.in',
+    magentoRest: process.env.PICKLEBALL_MAGENTO_REST || MAGENTO_REST,
+    magentoToken: process.env.PICKLEBALL_MAGENTO_TOKEN || MAGENTO_TOKEN,
+    phone: '+91 9502517700',
+    emoji: '\u{1F3D3}'
+  }
+};
+
+function getStoreConfig(sport) {
+  const s = String(sport || 'tennis').toLowerCase();
+  return STORE_CONFIG[s] || STORE_CONFIG.tennis;
+}
+
+function getStoreUrl(sport) {
+  return getStoreConfig(sport).storeUrl;
+}
+
 // OAuth 1.0a credentials (used for orders endpoint which requires admin OAuth)
 const OAUTH_CONSUMER_KEY = process.env.MAGENTO_CONSUMER_KEY;
 const OAUTH_CONSUMER_SECRET = process.env.MAGENTO_CONSUMER_SECRET;
@@ -44,10 +84,14 @@ const OAUTH_ACCESS_TOKEN = process.env.MAGENTO_ACCESS_TOKEN;
 const OAUTH_ACCESS_TOKEN_SECRET = process.env.MAGENTO_ACCESS_TOKEN_SECRET;
 
 // ==================== SYSTEM PROMPT ====================
-const SYSTEM_PROMPT = `You are "TO Assistant" - the official Customer Support Assistant for TennisOutlet.in, India's trusted online store for tennis, pickleball, and padel equipment.
+const SYSTEM_PROMPT = `You are "TO Assistant" - the official Customer Support Assistant for Pro Sports Outlets, India's trusted online stores for racquet sports:
+- Tennis: TennisOutlet.in (https://tennisoutlet.in)
+- Pickleball: PickleballOutlet.in (https://pickleballoutlet.in)
+- Padel: PadelOutlet.in (https://padeloutlet.in)
+Route product links to the correct store based on the sport detected.
 
 BRAND INFORMATION:
-- Website: https://tennisoutlet.in
+- Websites: https://tennisoutlet.in (Tennis) | https://pickleballoutlet.in (Pickleball) | https://padeloutlet.in (Padel)
 - Parent Company: Pro Sports Outlets
 - Store Address: Survey No. 47/A, near Sreenidhi International School, Aziznagar, Hyderabad, Telangana 500075
 - Store Timings: 10:30 AM - 06:00 PM, Mon-Sat
@@ -82,11 +126,11 @@ PRODUCT PRESENTATION RULES (MANDATORY — NEVER SKIP):
 - EVERY product MUST be a clickable markdown link using the product_url field from the tool response. This is the #1 most important rule.
 - Use this EXACT markdown format — the UI renders it as clickable links:
 
-1. **[Product Name](https://tennisoutlet.in/actual-product-slug.html)**
+1. **[Product Name](https://SPORT-STORE-URL/actual-product-slug.html)**
    Price: \u20B9X,XXX
    Coach's Take: <one-line reason / ideal user>
 
-- The product_url is already in every product object the tool returns. Copy it exactly into the markdown link parentheses. Example: if the tool returns product_url: "https://tennisoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html", write: **[Joola Hyperion Vision 16 mm - Storm Blue](https://tennisoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html)**
+- The product_url is already in every product object the tool returns. Copy it exactly into the markdown link parentheses. The URL already points to the correct store (tennisoutlet.in, pickleballoutlet.in, or padeloutlet.in) based on the sport. Example: if the tool returns product_url: "https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html", write: **[Joola Hyperion Vision 16 mm - Storm Blue](https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html)**
 - If you list a product WITHOUT a clickable link, the response is BROKEN and unusable. Always include the link.
 - NEVER show quantity/stock numbers to the customer.
 - NEVER use markdown images ![]().
@@ -139,7 +183,7 @@ BOUNDARIES:
 - Stay strictly within TennisOutlet / PickleballOutlet / PadelOutlet scope.
 - We do NOT carry New Balance - recommend alternatives.
 
-Use ${MAGENTO_STORE_URL} as the store origin for all product links.`;
+Use the sport-specific store URL for all product links: Tennis=https://tennisoutlet.in, Pickleball=https://pickleballoutlet.in, Padel=https://padeloutlet.in. The tool already returns the correct product_url — just use it.`;
 
 // ==================== FUNCTION DEFINITIONS ====================
 const FUNCTION_DEFINITIONS = [
@@ -308,7 +352,7 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
 // ==================== HELPERS ====================
 
 // Build product URL: prefer url_key, else derive from name; drop trailing SKU-like suffixes; ensure .html
-function buildProductUrl(urlKey, name, sku) {
+function buildProductUrl(urlKey, name, sku, sport = 'tennis') {
   // Use Magento's canonical url_key as-is. It is the exact storefront slug.
   let key = urlKey;
   if (!key && name) {
@@ -322,7 +366,8 @@ function buildProductUrl(urlKey, name, sku) {
   if (!key) key = (sku || '').toLowerCase();
   key = key.replace(/\.html?$/i, '');
   key = key.replace(/-+/g, '-').replace(/^-|-$/g, '');
-  return `${MAGENTO_STORE_URL}/${key}.html`;
+  const storeUrl = getStoreUrl(sport);
+  return `${storeUrl}/${key}.html`;
 }
 
 function extractCustomAttrs(item) {
@@ -603,7 +648,7 @@ async function fetchStockMap(skus) {
   return map;
 }
 
-function shapeProduct(item, qty) {
+function shapeProduct(item, qty, sport = 'tennis') {
   const attrs = extractCustomAttrs(item);
   const brandLabel = attrs.brands ? resolveAttr('brands', attrs.brands) : (attrs.brand || null);
   const shaped = {
@@ -613,8 +658,8 @@ function shapeProduct(item, qty) {
     special_price: attrs.special_price ? parseFloat(attrs.special_price) : null,
     brand: brandLabel,
     short_description: attrs.short_description ? String(attrs.short_description).replace(/<[^>]*>/g, '').substring(0, 200) : null,
-    product_url: buildProductUrl(attrs.url_key, item.name, item.sku),
-    image: attrs.image ? `${MAGENTO_STORE_URL}/media/catalog/product${attrs.image}` : null,
+    product_url: buildProductUrl(attrs.url_key, item.name, item.sku, sport),
+    image: attrs.image ? `${getStoreUrl(sport)}/media/catalog/product${attrs.image}` : null,
     qty
   };
   // Shoe-specific specs, resolved where possible
@@ -642,7 +687,7 @@ function shapeProduct(item, qty) {
   return shaped;
 }
 
-async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null } = {}) {
+async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
   try {
     const fetchSize = Math.max(pageSize * 3, 30);
     const params = {
@@ -663,7 +708,7 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
     const allZero = Object.values(stockMap).every(v => !v);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
     let pool = inStock.length ? inStock : (allZero ? shaped : []);
@@ -716,7 +761,7 @@ const SEARCH_STOPWORDS = new Set([
   'review','reviews','rating','ratings','feedback','price','cost','available','stock'
 ]);
 
-async function searchProducts(query, pageSize = 10, { min_price = null, max_price = null } = {}) {
+async function searchProducts(query, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
   try {
     const fetchSize = Math.max(pageSize * 3, 30);
     let result = await magentoGet('/products', buildSearchParams(query, fetchSize));
@@ -744,7 +789,7 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
     const allZero = Object.values(stockMap).every(v => !v);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
     let pool = inStock.length ? inStock : (allZero ? shaped : []);
@@ -807,7 +852,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
     const allZero = Object.values(stockMap).every(v => !v);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
@@ -880,7 +925,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
     const allZero = Object.values(stockMap).every(v => !v);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
     let pool = inStock.length ? inStock : (allZero ? shaped : []);
@@ -1006,7 +1051,7 @@ function listBrands() {
 // Combines three strategies (category → search tokens → url_key LIKE) and
 // unions the results, so we return every ball-machine-shaped product the
 // catalog has, even if a category wasn't indexed or the search stopped short.
-async function getBallMachines({ page_size = 10, min_price = null, max_price = null } = {}) {
+async function getBallMachines({ page_size = 10, min_price = null, max_price = null, sport = 'tennis' } = {}) {
   // v4.7.2: FAST-PATH first (single Magento call), then parallel fallback only if needed.
   // Previous versions ran 15+ concurrent Magento calls which overwhelmed the server.
   const seen = new Map();
@@ -1026,7 +1071,7 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
     if (result.items && result.items.length) {
       const skus = result.items.map(i => i.sku);
       const stockMap = await fetchStockMap(skus);
-      const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+      const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
       // These are simple products — enrichConfigurables is a no-op, skip it to save time.
       for (const p of shaped) if (!seen.has(p.sku)) seen.set(p.sku, p);
     }
@@ -1121,7 +1166,7 @@ async function getProductReviews({ sku = null, query = null, page_size = 5 } = {
       try {
         const res = await magentoGet(`/products/${encodeURIComponent(resolvedSku)}`);
         const stock = await fetchStockMap([res.sku]);
-        product = shapeProduct(res, stock[res.sku] || 0);
+        product = shapeProduct(res, stock[res.sku] || 0, 'tennis');
       } catch {}
     }
 
@@ -1166,15 +1211,15 @@ async function getProductReviews({ sku = null, query = null, page_size = 5 } = {
 }
 
 // ==================== EXECUTE ====================
-async function executeFunction(name, args) {
+async function executeFunction(name, args, sport = 'tennis') {
   switch (name) {
     case 'get_order_status': return await getOrderStatus(args.order_id);
-    case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size, { min_price: args.min_price, max_price: args.max_price });
-    case 'search_products': return await searchProducts(args.query, args.page_size, { min_price: args.min_price, max_price: args.max_price });
-    case 'get_shoes_with_specs': return await getShoesWithSpecs(args || {});
-    case 'get_racquets_with_specs': return await getRacquetsWithSpecs(args || {});
+    case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size, { min_price: args.min_price, max_price: args.max_price, sport });
+    case 'search_products': return await searchProducts(args.query, args.page_size, { min_price: args.min_price, max_price: args.max_price, sport });
+    case 'get_shoes_with_specs': return await getShoesWithSpecs({ ...(args || {}), sport: args?.sport || sport });
+    case 'get_racquets_with_specs': return await getRacquetsWithSpecs({ ...(args || {}), sport: args?.sport || sport });
     case 'list_brands': return listBrands();
-    case 'get_ball_machines': return await getBallMachines(args || {});
+    case 'get_ball_machines': return await getBallMachines({ ...(args || {}), sport });
     case 'find_categories': return { matches: findCategoriesByKeyword(args.keyword) };
     case 'list_categories': return { categories: listAllCategories(args || {}) };
     case 'get_product_reviews': return await getProductReviews(args || {});
@@ -1436,10 +1481,14 @@ app.post('/api/chat-agents', async (req, res) => {
 
     console.log(`[session:${sessionId}] turn=${turns} history=${serverHistory.length}msgs slots={${merged._rendered}}`);
 
+    // Bind sport to executeFunction so all tool calls get the right store URL
+    const detectedSport = merged.sport || 'tennis';
+    const sportBoundExecute = (name, args) => executeFunction(name, args, detectedSport);
+
     const result = await masterHandle({
       userMessages: fullMessages,
       allTools: FUNCTION_DEFINITIONS,
-      executeFunction,
+      executeFunction: sportBoundExecute,
       slots: merged,
       sessionHint
     });
