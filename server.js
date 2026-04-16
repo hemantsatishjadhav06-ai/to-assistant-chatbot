@@ -237,7 +237,7 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
     type: "function",
     function: {
       name: "get_shoes_with_specs",
-      description: "Return shoes from TennisOutlet with FULL resolved specs. Use this for ANY shoe query including brand, size availability, price caps, or spec filtering. All filters optional and AND-combined. Size filter checks child SKU stock ÃÂ¢ÃÂÃÂ if the requested size is out of stock the product is excluded.",
+      description: "Return shoes from TennisOutlet with FULL resolved specs. Use this for ANY shoe query including brand, size availability, price caps, or spec filtering. All filters optional and AND-combined. No server-side size filtering - LLM determines sizes from product names/SKUs ÃÂ¢ÃÂÃÂ if the requested size is out of stock the product is excluded.",
       parameters: {
         type: "object",
         properties: {
@@ -1030,124 +1030,26 @@ const SHOE_CATEGORIES = { tennis: 24, pickleball: 253, padel: 274 };
 
 async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = null, court_type = null, width = null, cushioning = null, size = null, min_price = null, max_price = null, page_size = 10 } = {}) {
   try {
-    // ==================== v6.0.6: SIZE-BY-NAME FAST PATH ====================
-    // When size is requested, search for SIMPLE child products whose name/SKU ends
-    // with the size (e.g. "TSH0010-10" for size 10). These have real prices and real
-    // stock — no enrichment needed. Zero extra API calls, zero timeouts.
-    if (size) {
-      const sizeStr = String(size).trim();
-      const sportKey = String(sport || 'tennis').toLowerCase();
-      const catIds = sportKey === 'all' ? [24, 253, 274] : [SHOE_CATEGORIES[sportKey] || 24];
-      const sizeFilters = [];
-      let si = 0;
-      // Category filter
-      if (catIds.length > 1) {
-        sizeFilters.push({ group: si++, field: 'category_id', value: catIds.join(','), conditionType: 'in' });
-      } else {
-        sizeFilters.push({ group: si++, field: 'category_id', value: String(catIds[0]) });
-      }
-      sizeFilters.push({ group: si++, field: 'status', value: 1 });
-      // Search for simple products — name ends with "-{size}" (e.g. "-10", "-9.5")
-      sizeFilters.push({ group: si++, field: 'name', value: `%-${sizeStr}`, conditionType: 'like' });
-      if (brand) {
-        const bid = brandNameToId(brand);
-        if (bid) sizeFilters.push({ group: si++, field: 'brands', value: bid });
-      }
-      const sizeParams = {
-        'searchCriteria[pageSize]': 50,
-        'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]]],total_count'
-      };
-      sizeFilters.forEach(f => {
-        sizeParams[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
-        sizeParams[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
-        if (f.conditionType) sizeParams[`searchCriteria[filter_groups][${f.group}][filters][0][conditionType]`] = f.conditionType;
-      });
+    // ==================== v6.1.0: ALL-SHOES-TO-LLM APPROACH ====================
+    // STRATEGY: Fetch ALL shoe configurables from ALL 3 categories (tennis + padel + pickleball).
+    // NO server-side size filtering. Return every shoe with qty >= 1.
+    // The LLM reads the last number in child product names to determine sizes.
+    // This avoids all Magento API limitations with child products & categories.
 
-      const sizeResult = await magentoGet('/products', sizeParams);
-      if (sizeResult.items && sizeResult.items.length > 0) {
-        // Get real stock for all found SKUs
-        const sizeSkus = sizeResult.items.map(i => i.sku);
-        const sizeStockMap = await fetchStockMap(sizeSkus);
-
-        // Shape and filter to qty >= 1 ONLY
-        const sized = sizeResult.items
-          .map(item => shapeProduct(item, sizeStockMap[item.sku] || 0, sport))
-          .filter(p => p && (p.qty || 0) >= 1);
-
-        // Deduplicate by parent SKU — keep only one per parent shoe model
-        // Parent SKU = everything before the last "-" (e.g. "TSH0010-10" -> "TSH0010")
-        const seen = new Map();
-        for (const p of sized) {
-          const parentSku = p.sku.replace(/-[^-]+$/, '');
-          if (!seen.has(parentSku) || (p.qty || 0) > (seen.get(parentSku).qty || 0)) {
-            // Strip the size suffix from the name for cleaner display
-            // "ASICS Court Slide 3 Men's Shoe - Black & White-10" -> "ASICS Court Slide 3 Men's Shoe - Black & White"
-            p.parent_sku = parentSku;
-            p.size_in_stock = sizeStr;
-            seen.set(parentSku, p);
-          }
-        }
-        let uniqueShoes = Array.from(seen.values());
-
-        // Apply price filters
-        if (min_price || max_price) {
-          const minP = min_price ? parseFloat(min_price) : null;
-          const maxP = max_price ? parseFloat(max_price) : null;
-          uniqueShoes = uniqueShoes.filter(p => {
-            const pr = parseFloat(p.price || 0);
-            if (pr <= 0) return true;
-            if (maxP && pr > maxP) return false;
-            if (minP && pr < minP) return false;
-            return true;
-          });
-        }
-
-        const finalShoes = uniqueShoes
-          .sort((a, b) => (b.qty || 0) - (a.qty || 0))
-          .slice(0, Math.min(page_size, 20));
-
-        // Clean internal fields
-        for (const p of finalShoes) {
-          p.in_stock = true;
-          delete p._children;
-          delete p.type_id;
-          delete p.magento_in_stock;
-          delete p._children_loaded;
-          delete p._stock_source;
-        }
-
-        if (finalShoes.length > 0) {
-          return {
-            sport,
-            filters_applied: { brand, shoe_type, court_type, width, cushioning, size: sizeStr, min_price, max_price },
-            products: finalShoes,
-            total: sizeResult.total_count,
-            showing: finalShoes.length,
-            filtered_out: sized.length - finalShoes.length,
-            message: `Showing ${finalShoes.length} shoes available in size ${sizeStr}. All sizes can be selected on each product page.`
-          };
-        }
-        // If all size matches had qty=0, fall through to the normal flow below
-      }
-      // If no size matches found at all, fall through to normal flow with a note
-    }
-    // ==================== END SIZE-BY-NAME FAST PATH ====================
-
-    // If sport is generic/null/all, we'll search the primary sport category.
-    // The "all sports" search is handled below as a multi-category merge.
+    // When size is requested, ALWAYS search all 3 categories so we find all shoes
     const sportKey = String(sport || 'tennis').toLowerCase();
-    const catId = SHOE_CATEGORIES[sportKey] || 24;
+    const searchAllCats = !!size || sportKey === 'all';
+
     const filters = [];
     let idx = 0;
-    if (String(sport).toLowerCase() === 'all') {
-      filters.push({ group: idx++, field: 'category_id', value: '274,253,24', conditionType: 'in' });
+    if (searchAllCats) {
+      filters.push({ group: idx++, field: 'category_id', value: '24,253,274', conditionType: 'in' });
     } else {
-      const catId = SHOE_CATEGORIES[String(sport).toLowerCase()] || 24;
+      const catId = SHOE_CATEGORIES[sportKey] || 24;
       filters.push({ group: idx++, field: 'category_id', value: String(catId) });
     }
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
-    // NOTE: removed quantity_and_stock_status ÃÂ¢ÃÂÃÂ stock verified via fetchStockMap + enrichConfigurables.
 
     if (brand) {
       const bid = brandNameToId(brand);
@@ -1157,14 +1059,14 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     for (const [code, val] of Object.entries(specMap)) {
       if (!val) continue;
       const optMap = ATTR_OPTIONS[code] || {};
-      // find matching option id
       const match = Object.entries(optMap).find(([, label]) => String(label).toLowerCase() === String(val).toLowerCase())
                  || Object.entries(optMap).find(([, label]) => String(label).toLowerCase().includes(String(val).toLowerCase()));
       if (match) filters.push({ group: idx++, field: code, value: match[0] });
     }
 
+    // Fetch a large pool - up to 50 configurables
     const params = {
-      'searchCriteria[pageSize]': Math.min(Math.max(page_size * 5, 30), 50),  // v6.0.4: larger fetch to get ALL shoes for LLM filtering
+      'searchCriteria[pageSize]': 50,
       'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
     };
     filters.forEach(f => {
@@ -1175,62 +1077,105 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
 
     const result = await magentoGet('/products', params);
     if (!result.items || result.items.length === 0) {
-      return { products: [], total: 0, message: `No ${sport} shoes matched those filters.` };
+      return { products: [], total: 0, message: `No ${sport} shoes found.` };
     }
+
+    // Get parent stock from stockItems API
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-    // v5.7.0: Enrich all configurables ÃÂ¢ÃÂÃÂ no time caps, correctness first
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+
+    // Enrich configurables to get child prices/stock (CAP=15)
     await enrichConfigurables(shaped, true);
 
-    const inStock = shaped.filter(isProductAvailable);
+    // v6.1.0: RELAXED stock gate for shoes - trust parent if enrichment failed
+    // If enrichment succeeded (_children_loaded), use summed child qty.
+    // If enrichment FAILED (timeout/error), trust the parent fetchStockMap qty.
+    // This ensures we don't drop shoes just because enrichment timed out.
+    const inStock = shaped.filter(p => {
+      if (!p) return false;
+      // Both enriched and unenriched: just check qty >= 1
+      return (p.qty || 0) >= 1;
+    });
+
+    // Apply price filters ONLY (no size filtering - LLM handles size)
     let pool = inStock;
-    // v6.0.5: DO NOT filter by size — return ALL in-stock shoes, LLM handles size from specs.available_sizes
-    const beforeCustomer = pool.length;
-    pool = applyPriceSizeFilters(pool, { min_price, max_price });
-    const filtered_out = beforeCustomer - pool.length;
-    let available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
-    let message = null;
-    // AUTO-FALLBACK: if size filter produced 0 results but we had products before filtering,
-    // return shoes without size filter + a note that size availability varies per product.
-    if (available.length === 0 && size && beforeCustomer > 0) {
-      const fallback = applyPriceSizeFilters(inStock, { min_price, max_price, size: null });
-      let fallbackAvail = stripInternals(fallback.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
-      if (fallbackAvail.length > 0) {
-        message = `I couldn't confirm size ${size} stock for ${sport} shoes right now. Showing available ${sport} shoes ÃÂ¢ÃÂÃÂ please select size ${size} on each product page to see if it's in stock.`;
-        return {
-          sport, filters_applied: { brand, shoe_type, court_type, width, cushioning, size: null, min_price, max_price },
-          products: fallbackAvail, total: result.total_count, showing: fallbackAvail.length,
-          filtered_out: 0, message, size_note: `Size ${size} availability varies per product ÃÂ¢ÃÂÃÂ check the size dropdown on each PDP`
-        };
+    const beforePriceFilter = pool.length;
+    pool = applyPriceSizeFilters(pool, { min_price, max_price }); // size deliberately NOT passed
+    const filtered_out = beforePriceFilter - pool.length;
+
+    // Sort by qty descending, take up to 20
+    let available = pool.sort((a, b) => (b.qty || 0) - (a.qty || 0)).slice(0, 20);
+
+    // v6.1.0: For size queries, include child sizes in the response so LLM can read sizes
+    // The last number in child SKU (e.g. "TSH0010-10" -> size 10)
+    if (size) {
+      for (const p of available) {
+        if (Array.isArray(p._children) && p._children.length > 0) {
+          // Build sizes_in_stock from child SKUs that have qty >= 1
+          const sizesInStock = p._children
+            .filter(c => (c.qty || 0) >= 1)
+            .map(c => {
+              const skuMatch = c.sku.match(/-([^-]+)$/);
+              return skuMatch ? skuMatch[1] : null;
+            })
+            .filter(Boolean);
+          if (sizesInStock.length > 0) {
+            p.sizes_in_stock = [...new Set(sizesInStock)].sort((a, b) => parseFloat(a) - parseFloat(b));
+          }
+        }
       }
     }
-    // v5.7.3: Price fallback Ã¢ÂÂ if price filter gave 0 results, show closest by price
-    if (available.length === 0 && (min_price || max_price) && beforeCustomer > 0) {
-      const mid = (min_price && max_price) ? (min_price + max_price) / 2
-                : max_price ? max_price * 0.8
-                : min_price ? min_price * 1.2 : 5000;
+
+    // Strip internals (relaxed - already filtered qty >= 1 above)
+    available = available.filter(p => {
+      if (!p) return false;
+      if ((p.qty || 0) < 1) return false;
+      p.in_stock = true;
+      delete p._children;
+      delete p.type_id;
+      delete p.magento_in_stock;
+      delete p._children_loaded;
+      delete p._stock_source;
+      return true;
+    });
+
+    // Price fallback - if price filter gave 0 results, show closest by price
+    let message = null;
+    if (available.length === 0 && (min_price || max_price) && beforePriceFilter > 0) {
+      const mid = (min_price && max_price) ? (parseFloat(min_price) + parseFloat(max_price)) / 2
+                : max_price ? parseFloat(max_price) * 0.8
+                : min_price ? parseFloat(min_price) * 1.2 : 5000;
       const sorted = inStock.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
-      available = stripInternals(sorted.slice(0, Math.min(page_size, 20)));
+      available = sorted.slice(0, 20).filter(p => {
+        if (!p || (p.qty || 0) < 1) return false;
+        p.in_stock = true;
+        delete p._children; delete p.type_id; delete p.magento_in_stock;
+        delete p._children_loaded; delete p._stock_source;
+        return true;
+      });
       const bits = [];
       if (min_price) bits.push(`\u20B9${Number(min_price).toLocaleString('en-IN')}`);
       if (max_price) bits.push(`\u20B9${Number(max_price).toLocaleString('en-IN')}`);
-      message = `No exact matches in the ${bits.join(' to ')} range. Showing the closest available ${sport} shoes by price...`;
-    } else if (available.length === 0 && beforeCustomer > 0) {
-      const reasons = [];
-      if (size) reasons.push(`size ${size}`);
-      if (max_price) reasons.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
-      if (min_price) reasons.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
-      message = `No ${sport} shoes match the requested filters${reasons.length ? ` (${reasons.join(', ')})` : ''}.`;
+      message = `No exact matches in the ${bits.join(' to ')} range. Showing the closest available shoes by price...`;
     }
-    // If size was requested but we have results, add a helpful note
-    if (available.length > 0 && size) {
-      message = `Showing shoes with size ${size} in stock. All other sizes can be selected on each product page.`;
+
+    if (size && available.length > 0) {
+      message = `Showing ${available.length} shoes from all stores (qty >= 1). SIZE NOTE: Customer asked for size ${size}. Check each product name - the last number after "-" is the size (e.g. name ending in "-10" = size 10). Also check "sizes_in_stock" array if present. If sizes_in_stock is missing, tell customer to check size on product page.`;
+    } else if (!message) {
+      message = available.length > 0
+        ? `Showing ${available.length} shoes with qty >= 1.`
+        : `No shoes with stock found matching those filters.`;
     }
+
     return {
-      sport, filters_applied: { brand, shoe_type, court_type, width, cushioning, size, min_price, max_price },
-      products: available, total: result.total_count, showing: available.length,
-      filtered_out, message
+      sport: searchAllCats ? 'all' : sport,
+      filters_applied: { brand, shoe_type, court_type, width, cushioning, size, min_price, max_price },
+      products: available,
+      total: result.total_count,
+      showing: available.length,
+      filtered_out,
+      message
     };
   } catch (error) {
     console.error('getShoesWithSpecs error:', error.response?.status, error.message);
