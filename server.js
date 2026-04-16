@@ -604,7 +604,7 @@ async function magentoGet(endpoint, params = {}) {
       'Accept': 'application/json'
     },
     params,
-    timeout: 20000
+    timeout: 10000   // v5.5.0: tighter for Render 30s gateway limit
   });
   return response.data;
 }
@@ -1196,8 +1196,8 @@ async function enrichConfigurables(products, forceAll = true) {
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
   // dropped enrichments mean dropped products — so we must enrich more, faster.
-  const CAP = 8;
-  const CONCURRENCY = 8;
+  const CAP = 5;
+  const CONCURRENCY = 5;
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1246,7 +1246,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 4000); }
+        try { await withTimeout(enrichOne(item), 3000); }
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
