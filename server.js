@@ -1196,8 +1196,8 @@ async function enrichConfigurables(products, forceAll = true) {
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
   // dropped enrichments mean dropped products — so we must enrich more, faster.
-  const CAP = 15;
-  const CONCURRENCY = 10;
+  const CAP = 8;
+  const CONCURRENCY = 8;
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1246,7 +1246,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 5000); }
+        try { await withTimeout(enrichOne(item), 4000); }
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
