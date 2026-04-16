@@ -1795,16 +1795,22 @@ app.post('/api/chat-agents', async (req, res) => {
 
     const prior = sessionStore.get(sessionId).slots || {};
 
-    // v5.6.0: LLM query normalizer runs FIRST. Transforms messy real-world
-    // messages ("i like to play... bat... 20K to 30K") into a clean spec.
-    // Falls back gracefully to regex parser if the LLM call fails.
-    const conversationHistoryForNormalizer = sessionStore.getHistory(sessionId);
-    const normResult = await normalizeQuery(lastUser, conversationHistoryForNormalizer);
+    // v5.6.0: Run deterministic parser first. If it already has high-confidence
+    // intent (shoe, order, greeting, etc.), skip the normalizer to save ~1.5s.
+    // Only call normalizer for ambiguous/messy queries where regex can't help.
     const fresh = slotParser.parseSlots(lastUser);
     let merged = slotParser.mergeSlots(prior, fresh);
-    if (normResult.ok && normResult.spec) {
-      merged = slotParser.slotsFromSpec(normResult.spec, merged);
-      merged._normalizer_spec = normResult.spec;
+    const skipNormalizer = !!(merged.intent_hint && ['shoe', 'order', 'greeting', 'brand', 'policy'].includes(merged.intent_hint));
+    let normResult = { ok: false, spec: null, latency_ms: 0 };
+    if (!skipNormalizer) {
+      const conversationHistoryForNormalizer = sessionStore.getHistory(sessionId);
+      normResult = await normalizeQuery(lastUser, conversationHistoryForNormalizer);
+      if (normResult.ok && normResult.spec) {
+        merged = slotParser.slotsFromSpec(normResult.spec, merged);
+        merged._normalizer_spec = normResult.spec;
+      }
+    } else {
+      console.log(`[normalizer] skipped — parser already has intent_hint=${merged.intent_hint}`);
     }
 
     // v5.5.0 + v5.6.0: Follow-up detection — prefer normalizer's is_follow_up flag.
