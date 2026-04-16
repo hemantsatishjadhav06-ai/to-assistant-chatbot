@@ -164,10 +164,13 @@ SMART GUIDELINES:
 - Cross-sell: racquet -> suggest strings/bags/shoes.
 
 SIZE / SIZE-SPECIFIC REQUESTS (IMPORTANT):
-- Shoe sizes (UK/US/EU) and apparel sizes are selected on the product page - they are NOT in product names.
-- NEVER tell the customer "we don't have size X". Instead, ALWAYS call get_products_by_category with the correct shoes category (Tennis Shoes 24, Pickleball Shoes 253, Padel Shoes 274) and show 4-5 products.
-- After the list, add: "All sizes (including size X) can be selected on each product page. If a specific size is sold out, it will be marked on that page."
-- Same rule for grip size on racquets, apparel sizes (S/M/L/XL), string tension, etc. - show the category, tell the user where to pick the variant on the product page.
+- Shoe sizes (UK/US/EU) and apparel sizes are VARIANTS selected on each product page — they are NOT separate products and NOT in product names.
+- NEVER tell the customer "we don't have size X" or "no shoes in size X". Sizes are available on each product page.
+- For shoe queries WITH a size: call get_shoes_with_specs with the size parameter. The tool will try to find exact size matches, and if none, will automatically fall back to showing all available shoes with a note about size selection.
+- For shoe queries WITHOUT a size: call get_shoes_with_specs normally, show 4-5 products.
+- ALWAYS show shoes with clickable links. After the list, add: "All sizes (including size X) can be selected on each product page. If a specific size is sold out, it will be marked on that page."
+- If the customer says "sports shoes" or just "shoes" without specifying tennis/pickleball/padel, pass sport="all" to get_shoes_with_specs to search across all stores.
+- Same rule for grip size on racquets, apparel sizes (S/M/L/XL), string tension, etc. — show the category, tell the user where to pick the variant on the product page.
 
 PAYMENT:
 - Cards, Net Banking, UPI, EMI, COD. EMI: "coming within a week".
@@ -818,7 +821,10 @@ const SHOE_CATEGORIES = { tennis: 24, pickleball: 253, padel: 274 };
 
 async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = null, court_type = null, width = null, cushioning = null, size = null, min_price = null, max_price = null, page_size = 10 } = {}) {
   try {
-    const catId = SHOE_CATEGORIES[String(sport).toLowerCase()] || 24;
+    // If sport is generic/null/all, we'll search the primary sport category.
+    // The "all sports" search is handled below as a multi-category merge.
+    const sportKey = String(sport || 'tennis').toLowerCase();
+    const catId = SHOE_CATEGORIES[sportKey] || 24;
     const filters = [];
     let idx = 0;
     filters.push({ group: idx++, field: 'category_id', value: catId });
@@ -854,7 +860,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const allZero = Object.values(stockMap).every(v => !v);
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
-    await enrichConfigurables(shaped);
+    await enrichConfigurables(shaped, !!size);  // forceAll when size filter active
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
     let pool = inStock.length ? inStock : (allZero ? shaped : []);
     // Customer-requested filters: size, min_price, max_price.
@@ -864,12 +870,32 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
     stripInternals(available);
     let message = null;
+    // AUTO-FALLBACK: if size filter produced 0 results but we had products before filtering,
+    // return ALL shoes without size filter + a note about selecting size on product page.
+    if (available.length === 0 && size && beforeCustomer > 0) {
+      // Retry without size filter — show what's available
+      const fallback = applyPriceSizeFilters(inStock.length ? inStock : shaped, { min_price, max_price, size: null });
+      const fallbackAvail = fallback.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
+      stripInternals(fallbackAvail);
+      if (fallbackAvail.length > 0) {
+        message = `Showing ${sport} shoes — all sizes including size ${size} can be selected on each product page. If a specific size is sold out, it will be marked on the page.`;
+        return {
+          sport, filters_applied: { brand, shoe_type, court_type, width, cushioning, size: null, min_price, max_price },
+          products: fallbackAvail, total: result.total_count, showing: fallbackAvail.length,
+          filtered_out: 0, message, size_note: `Size ${size} selection available on product pages`
+        };
+      }
+    }
     if (available.length === 0 && beforeCustomer > 0) {
       const reasons = [];
       if (size) reasons.push(`size ${size}`);
       if (max_price) reasons.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
       if (min_price) reasons.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
       message = `No ${sport} shoes match the requested filters${reasons.length ? ` (${reasons.join(', ')})` : ''}.`;
+    }
+    // If size was requested but we have results, add a helpful note
+    if (available.length > 0 && size) {
+      message = `Showing shoes with size ${size} in stock. All other sizes can be selected on each product page.`;
     }
     return {
       sport, filters_applied: { brand, shoe_type, court_type, width, cushioning, size, min_price, max_price },
@@ -956,8 +982,11 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
 // Magento stores price=0 and qty=0 on configurable parents; real values live on children.
 // After this runs, p.price / p.price_max / p.qty reflect the child aggregate, and
 // p._children holds per-child {sku, price, qty, size} for downstream size/price filtering.
-async function enrichConfigurables(products) {
-  const targets = products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
+async function enrichConfigurables(products, forceAll = false) {
+  // forceAll=true when size filter is requested — we need _children for ALL products to check sizes
+  const targets = forceAll
+    ? products.filter(p => p != null)
+    : products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
   if (targets.length === 0) return products;
   // v4.4.0: cap to first 20 and limit concurrency to 5 to avoid Render 30s request timeout
   const CAP = 20;
@@ -1216,7 +1245,27 @@ async function executeFunction(name, args, sport = 'tennis') {
     case 'get_order_status': return await getOrderStatus(args.order_id);
     case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size, { min_price: args.min_price, max_price: args.max_price, sport });
     case 'search_products': return await searchProducts(args.query, args.page_size, { min_price: args.min_price, max_price: args.max_price, sport });
-    case 'get_shoes_with_specs': return await getShoesWithSpecs({ ...(args || {}), sport: args?.sport || sport });
+    case 'get_shoes_with_specs': {
+      const shoeSport = args?.sport || sport || 'tennis';
+      // If sport is 'all' or unspecified generic, search all 3 shoe categories and merge
+      if (shoeSport === 'all') {
+        const results = await Promise.all(['tennis', 'pickleball', 'padel'].map(s =>
+          getShoesWithSpecs({ ...(args || {}), sport: s })
+        ));
+        const merged = { sport: 'all', products: [], total: 0, showing: 0, message: null };
+        for (const r of results) {
+          merged.products.push(...(r.products || []));
+          merged.total += (r.total || 0);
+        }
+        merged.products.sort((a, b) => (b.qty || 0) - (a.qty || 0));
+        merged.products = merged.products.slice(0, Math.min(args?.page_size || 10, 20));
+        merged.showing = merged.products.length;
+        if (merged.products.length === 0) merged.message = 'No shoes found across any sport category.';
+        else merged.message = results.find(r => r.message)?.message || null;
+        return merged;
+      }
+      return await getShoesWithSpecs({ ...(args || {}), sport: shoeSport });
+    }
     case 'get_racquets_with_specs': return await getRacquetsWithSpecs({ ...(args || {}), sport: args?.sport || sport });
     case 'list_brands': return listBrands();
     case 'get_ball_machines': return await getBallMachines({ ...(args || {}), sport });
