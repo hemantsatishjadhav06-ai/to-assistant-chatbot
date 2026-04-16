@@ -1037,14 +1037,15 @@ async function enrichConfigurables(products, forceAll = true) {
       }
       const sp = children.map(c => parseFloat(c.special_price || 0)).filter(v => v > 0);
       if (sp.length && !p.special_price) p.special_price = Math.min(...sp);
-      // Stock: per-child and summed.
+      // Stock: per-child and summed. ALWAYS override parent qty with children total.
+      // This corrects false positives from /stockItems (is_in_stock=true but children OOS).
       let stockMap = {};
       try {
         const childSkus = children.map(c => c.sku);
         stockMap = await fetchStockMap(childSkus);
         const total = Object.values(stockMap).reduce((a, b) => a + (parseFloat(b) || 0), 0);
-        if (total > 0) p.qty = total;
-      } catch { /* keep parent qty */ }
+        p.qty = total;  // ALWAYS set: 0 means all children are OOS
+      } catch { /* keep parent qty from fetchStockMap */ }
       p._children_loaded = true;  // Flag: children were successfully fetched
       // Per-child detail for size / price filtering
       p._children = children.map(c => {
