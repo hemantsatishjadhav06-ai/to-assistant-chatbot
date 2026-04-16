@@ -156,6 +156,7 @@ ROUTING RULES (STRICT - follow these exactly):
 - ACCESSORIES -> get_products_by_category (37).
 - USED racquets -> get_products_by_category (90).
 - Sale/Wimbledon/Grand Slam offers -> get_products_by_category (292/349/437).
+- RACQUET UPGRADE / TRADE-IN / SELL OLD RACQUET -> Direct customer to: https://tennisoutlet.in/racquet-upgrade-program — we purchase customer's old racquets through our Racquet Upgrade Program.
 - FALLBACK: If no rule above matches the product type, call search_products with the customer's keywords. NEVER refuse a product query without trying at least one Magento tool.
 
 SMART GUIDELINES:
@@ -163,6 +164,7 @@ SMART GUIDELINES:
 - Brand-specific racquet -> get_racquets_with_specs({brand:"Babolat"|"Head"|"Wilson"|"YONEX"|"Prince"...}).
 - Expensive items -> mention WELCOME10 coupon (10% off up to \u20B9300) for first-time buyers.
 - Cross-sell: racquet -> suggest strings/bags/shoes.
+- When recommending new racquets, mention the Racquet Upgrade Program (https://tennisoutlet.in/racquet-upgrade-program) — customers can trade in their old racquet.
 
 SIZE / SIZE-SPECIFIC REQUESTS (IMPORTANT):
 - Shoe sizes (UK/US/EU) and apparel sizes are VARIANTS selected on each product page — they are NOT separate products and NOT in product names.
@@ -717,36 +719,22 @@ function shapeProduct(item, qty, sport = 'tennis') {
   return shaped;
 }
 
-// STRICT availability check (v5.1.3):
-// qty >= 1 is the ONLY rule. No exceptions.
+// STRICT availability check (v5.2.0):
+// Simple products: qty >= 1.
+// Configurable products: children must have been loaded AND summed qty >= 1.
+// No fake-available fallback — we'd rather show fewer real products than dead links.
 function isProductAvailable(p) {
   if (!p) return false;
+  if (p.type_id === 'configurable') {
+    // Must have verified children. If enrichment timed out, exclude.
+    if (!p._children_loaded) return false;
+    return (p.qty || 0) >= 1;
+  }
   return (p.qty || 0) >= 1;
 }
 
-// Post-enrichment fallback (v5.1.3):
-// After enrichConfigurables runs, some configurable products may not have had
-// their children loaded (timeout on Render free tier). For those products,
-// if Magento's own search filter (quantity_and_stock_status=1) already deemed
-// them in-stock AND the product's stock_item.is_in_stock is true, we trust
-// Magento's signal and set a minimum qty=1.
-// This ONLY applies when enrichment failed — if enrichment succeeded and found
-// all children OOS (qty=0), we respect that result.
-function applyFallbackStock(products) {
-  for (const p of products) {
-    if (!p) continue;
-    // If enrichment loaded children successfully, trust the result (even if qty=0)
-    if (p._children_loaded) continue;
-    // Only apply fallback to configurable products (simples get accurate MSI qty)
-    if (p.type_id !== 'configurable') continue;
-    // If Magento's stock_item says in_stock AND enrichment didn't run/timed out,
-    // set minimum qty=1 so the product appears in results
-    if (p.magento_in_stock === true && (p.qty || 0) < 1) {
-      p.qty = 1;
-      p._stock_source = 'magento_fallback';
-    }
-  }
-}
+// applyFallbackStock removed in v5.2.0 — was creating false-positives on timed-out
+// enrichment. Replacement strategy: tighter enrichment concurrency + cap (see CHANGE 4).
 
 async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
   try {
@@ -758,9 +746,8 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
       'searchCriteria[filter_groups][1][filters][0][value]': 1,
       'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
       'searchCriteria[filter_groups][2][filters][0][value]': 4,
-      // Magento-side stock filter: only return products Magento considers IN STOCK
-      'searchCriteria[filter_groups][3][filters][0][field]': 'quantity_and_stock_status',
-      'searchCriteria[filter_groups][3][filters][0][value]': 1,
+      // NOTE: removed quantity_and_stock_status pre-filter — unreliable on MSI for configurables.
+      // Real stock verification happens downstream via fetchStockMap + enrichConfigurables.
       'searchCriteria[pageSize]': Math.min(fetchSize, 100),
       'searchCriteria[sortOrders][0][field]': 'created_at',
       'searchCriteria[sortOrders][0][direction]': 'DESC'
@@ -773,22 +760,21 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
-    applyFallbackStock(shaped);  // v5.1.3: trust Magento signal for timed-out configurables
+
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
-    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20));
-    stripInternals(available);
+    const final = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20)));
     let message = null;
-    if (available.length === 0 && beforeCustomer > 0) {
+    if (final.length === 0 && beforeCustomer > 0) {
       const bits = [];
       if (max_price) bits.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
       if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
       message = `No products in this category match the price filter${bits.length ? ` (${bits.join(', ')})` : ''}.`;
     }
-    return { products: available, total: result.total_count, showing: available.length, filtered_out, message };
+    return { products: final, total: result.total_count, showing: final.length, filtered_out, message };
   } catch (error) {
     console.error('getProductsByCategory error:', error.response?.status, error.message);
     return { error: true, message: "Unable to fetch products at this time. Please try again." };
@@ -815,9 +801,7 @@ function buildSearchParams(pattern, pageSize) {
     // AND visibility=4 (catalog+search)
     'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
     'searchCriteria[filter_groups][2][filters][0][value]': 4,
-    // AND quantity_and_stock_status=1 (Magento-side: only return products Magento considers IN STOCK)
-    'searchCriteria[filter_groups][3][filters][0][field]': 'quantity_and_stock_status',
-    'searchCriteria[filter_groups][3][filters][0][value]': 1,
+    // NOTE: removed quantity_and_stock_status pre-filter — stock verified downstream.
     'searchCriteria[pageSize]': Math.min(pageSize, 100),
     'searchCriteria[sortOrders][0][field]': 'name',
     'searchCriteria[sortOrders][0][direction]': 'ASC'
@@ -860,22 +844,21 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
-    applyFallbackStock(shaped);  // v5.1.3: trust Magento signal for timed-out configurables
+
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
-    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20));
-    stripInternals(available);
+    const final = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20)));
     let message = null;
-    if (available.length === 0 && beforeCustomer > 0) {
+    if (final.length === 0 && beforeCustomer > 0) {
       const bits = [];
       if (max_price) bits.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
       if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
       message = `No matches for "${query}"${bits.length ? ` (${bits.join(', ')})` : ''}.`;
     }
-    return { products: available, total: result.total_count, showing: available.length, filtered_out, message, query };
+    return { products: final, total: result.total_count, showing: final.length, filtered_out, message, query };
   } catch (error) {
     console.error('searchProducts error:', error.response?.status, error.message);
     return { error: true, message: "Unable to search products at this time. Please try again." };
@@ -897,7 +880,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     filters.push({ group: idx++, field: 'category_id', value: catId });
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
-    filters.push({ group: idx++, field: 'quantity_and_stock_status', value: 1 });
+    // NOTE: removed quantity_and_stock_status — stock verified via fetchStockMap + enrichConfigurables.
 
     if (brand) {
       const bid = brandNameToId(brand);
@@ -928,29 +911,26 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
     await enrichConfigurables(shaped, true);  // ALWAYS forceAll for shoes — must verify child stock
-    applyFallbackStock(shaped);  // v5.1.3: trust Magento signal for timed-out configurables
+
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     // Customer-requested filters: size, min_price, max_price.
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price, size });
     const filtered_out = beforeCustomer - pool.length;
-    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
-    stripInternals(available);
+    let available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
     let message = null;
     // AUTO-FALLBACK: if size filter produced 0 results but we had products before filtering,
-    // return ALL shoes without size filter + a note about selecting size on product page.
+    // return shoes without size filter + a note that size availability varies per product.
     if (available.length === 0 && size && beforeCustomer > 0) {
-      // Retry without size filter — show what's available
       const fallback = applyPriceSizeFilters(inStock, { min_price, max_price, size: null });
-      const fallbackAvail = fallback.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
-      stripInternals(fallbackAvail);
+      let fallbackAvail = stripInternals(fallback.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
       if (fallbackAvail.length > 0) {
-        message = `Showing ${sport} shoes — all sizes including size ${size} can be selected on each product page. If a specific size is sold out, it will be marked on the page.`;
+        message = `I couldn't confirm size ${size} stock for ${sport} shoes right now. Showing available ${sport} shoes — please select size ${size} on each product page to see if it's in stock.`;
         return {
           sport, filters_applied: { brand, shoe_type, court_type, width, cushioning, size: null, min_price, max_price },
           products: fallbackAvail, total: result.total_count, showing: fallbackAvail.length,
-          filtered_out: 0, message, size_note: `Size ${size} selection available on product pages`
+          filtered_out: 0, message, size_note: `Size ${size} availability varies per product — check the size dropdown on each PDP`
         };
       }
     }
@@ -988,7 +968,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     filters.push({ group: idx++, field: 'category_id', value: catId });
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
-    filters.push({ group: idx++, field: 'quantity_and_stock_status', value: 1 });
+    // NOTE: removed quantity_and_stock_status — stock verified via fetchStockMap + enrichConfigurables.
     // v4.5.0: configurable-only restriction applies ONLY to tennis (grip-size variants).
     // Pickleball paddles & padel rackets are simple SKUs — restricting breaks them.
     if (String(sport).toLowerCase() === 'tennis') {
@@ -1021,14 +1001,13 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
-    applyFallbackStock(shaped);  // v5.1.3: trust Magento signal for timed-out configurables
+
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
-    const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
-    stripInternals(available);
+    const available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
     let message = null;
     if (available.length === 0 && beforeCustomer > 0) {
       const bits = [];
@@ -1053,14 +1032,15 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
 // p._children holds per-child {sku, price, qty, size} for downstream size/price filtering.
 async function enrichConfigurables(products, forceAll = true) {
   // forceAll=true by default — we MUST verify child stock for every configurable product.
-  // Magento's quantity_and_stock_status filter is the first gate; enrichment is the second.
+  // v5.2.0: quantity_and_stock_status removed; enrichment is the sole stock gate.
   const targets = forceAll
     ? products.filter(p => p != null)
     : products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
   if (targets.length === 0) return products;
-  // v4.4.0: cap to first 20 and limit concurrency to 5 to avoid Render 30s request timeout
-  const CAP = 15;
-  const CONCURRENCY = 4;
+  // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
+  // dropped enrichments mean dropped products — so we must enrich more, faster.
+  const CAP = 30;
+  const CONCURRENCY = 8;
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1109,7 +1089,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 8000); }
+        try { await withTimeout(enrichOne(item), 5000); }
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
@@ -1141,16 +1121,21 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
   });
 }
 
-// Strip internal-only fields before returning to the LLM (keeps payload small).
+// Strip internal-only fields + HARD stock gate before returning to the LLM.
+// v5.2.0: returns a NEW array filtered by qty >= 1 — no zero-qty product can escape.
 function stripInternals(products) {
-  (products || []).forEach(p => {
-    if (p && p._children) delete p._children;
-    // Add explicit in_stock flag: only products with qty >= 1 are available
-    if (p) p.in_stock = (p.qty || 0) >= 1;
-    // Clean up ALL internal fields the LLM doesn't need
-    if (p) { delete p.type_id; delete p.magento_in_stock; delete p._children_loaded; }
+  return (products || []).filter(p => {
+    if (!p) return false;
+    // HARD GATE: only products with real stock leave the server
+    if ((p.qty || 0) < 1) return false;
+    p.in_stock = true;
+    delete p._children;
+    delete p.type_id;
+    delete p.magento_in_stock;
+    delete p._children_loaded;
+    delete p._stock_source;
+    return true;
   });
-  return products;
 }
 
 function listBrands() {
@@ -1177,9 +1162,7 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
       'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
       'searchCriteria[filter_groups][1][filters][0][field]': 'status',
       'searchCriteria[filter_groups][1][filters][0][value]': 1,
-      // Magento-side stock filter
-      'searchCriteria[filter_groups][2][filters][0][field]': 'quantity_and_stock_status',
-      'searchCriteria[filter_groups][2][filters][0][value]': 1,
+      // NOTE: removed quantity_and_stock_status — stock verified downstream.
       'searchCriteria[pageSize]': 20
     };
     const result = await magentoGet('/products', params);
@@ -1237,8 +1220,7 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
 
   let pool = [...seen.values()].filter(isProductAvailable);  // SMART: configurables trusted, simples checked
   pool = applyPriceSizeFilters(pool, { min_price, max_price });
-  const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
-  stripInternals(available);
+  const available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
 
   let message = null;
   if (available.length === 0 && seen.size > 0) {
@@ -1369,6 +1351,9 @@ async function executeFunction(name, args, sport = 'tennis') {
 // No extra LLM round-trip — pure regex/keyword scoring, so latency stays flat.
 const INTENT_RULES = [
   // intent,            patterns (match any),                                     forceTool,                                        hint
+  { intent: 'shoe',
+    rx: [/\b(shoe|shoes|footwear|sneaker|sneakers|trainer|trainers)\b/i, /sports?\s+shoe/i, /court\s+shoe/i],
+    force: 'get_shoes_with_specs' },
   { intent: 'ball_machine',
     rx: [/ball\s*machine/i, /ball\s*thrower/i, /ball\s*cannon/i, /ball\s*launcher/i, /ball\s*feeder/i, /\btenniix\b/i, /\bai\s*ball\b/i, /smart\s*ball/i],
     force: 'get_ball_machines' },
@@ -1875,7 +1860,7 @@ app.get('/api/stock-debug', async (req, res) => {
     const enrichStart = Date.now();
     await enrichConfigurables(shaped);
     const enrichMs = Date.now() - enrichStart;
-    applyFallbackStock(shaped);
+    // applyFallbackStock removed in v5.2.0
     const debugProducts = shaped.map(p => ({
       name: p.name,
       sku: p.sku,
