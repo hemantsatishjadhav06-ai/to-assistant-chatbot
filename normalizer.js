@@ -1,8 +1,10 @@
-// normalizer.js — LLM-powered query normalization (v5.6.0)
+// normalizer.js — LLM-powered query normalization (v6.0.0)
 // Converts messy natural-language messages into a clean, structured QuerySpec
 // before any specialist runs. Handles typos, slang ("bat" = racquet), Hinglish,
 // budget phrases ("20K to 30K"), playing-style descriptions ("best balance"),
 // and implicit intent ("i like to play" = browsing intent).
+//
+// v6.0.0: Added 6 new intents — availability, comparison, starter_kit, coupon, stringing, tech
 //
 // Uses gpt-4o-mini in JSON mode for speed + cost. Single call, ~300ms.
 // Falls back to the raw message if the call fails — never blocks the flow.
@@ -16,7 +18,7 @@ const NORMALIZER_PROMPT = `You are a query normalizer for a tennis/pickleball/pa
 
 SCHEMA:
 {
-  "intent": "racquet" | "shoe" | "ball" | "string" | "bag" | "overgrip" | "accessory" | "ball_machine" | "order" | "policy" | "brand" | "review" | "greeting" | "other",
+  "intent": "racquet" | "shoe" | "ball" | "string" | "bag" | "overgrip" | "accessory" | "ball_machine" | "order" | "policy" | "brand" | "review" | "availability" | "comparison" | "starter_kit" | "coupon" | "stringing" | "tech" | "greeting" | "other",
   "sport": "tennis" | "pickleball" | "padel" | null,
   "brand": "Babolat" | "Wilson" | "Head" | "Yonex" | "ASICS" | "Nike" | "Adidas" | "Prince" | "Solinco" | "Dunlop" | "Tecnifibre" | "Joma" | "Selkirk" | "Joola" | "Franklin" | "Bullpadel" | "Nox" | "Siux" | null,
   "model": string or null,
@@ -54,6 +56,12 @@ INTERPRETATION RULES (CRITICAL):
 11. If message is just "more"/"another"/"cheaper"/"5 shoes" -> is_follow_up: true, refinement_type set, intent usually inherited from context.
 12. If the message is a pure greeting ("hi", "hello") -> intent: "greeting".
 13. If it's clearly off-topic (weather, math, jokes) -> intent: "other".
+14. AVAILABILITY: "is X in stock", "do you have X", "available hai kya", "is this available", sharing a product name/URL and asking about stock -> intent: "availability".
+15. COMPARISON: "compare X and Y", "X vs Y", "difference between X and Y", "which is better X or Y" -> intent: "comparison".
+16. STARTER KIT: "beginner kit", "starter kit", "complete set for beginner", "new to tennis what do I need", "starting out need everything" -> intent: "starter_kit".
+17. COUPON: "any offers", "discount code", "coupon", "sale", "koi offer hai", "promo code" -> intent: "coupon".
+18. STRINGING: "stringing service", "restring", "string my racquet", "string tension", "gut string" -> intent: "stringing".
+19. TECH: "what weight is X", "head size of Y", "string pattern", "swingweight", "beam width", technical specs question -> intent: "tech".
 
 EXAMPLES:
 
@@ -77,6 +85,24 @@ Output: {"intent":"order","sport":null,"brand":null,"model":null,"skill_level":n
 
 Input: "kya aapke pas selkirk paddles hai"
 Output: {"intent":"racquet","sport":"pickleball","brand":"Selkirk","model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"Selkirk pickleball paddles","confidence":0.94}
+
+Input: "is babolat pure aero available"
+Output: {"intent":"availability","sport":"tennis","brand":"Babolat","model":"Pure Aero","skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"Babolat Pure Aero availability","confidence":0.96}
+
+Input: "compare head speed and babolat pure aero"
+Output: {"intent":"comparison","sport":"tennis","brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"compare Head Speed vs Babolat Pure Aero","confidence":0.95}
+
+Input: "i am new to tennis need a complete starter kit under 15K"
+Output: {"intent":"starter_kit","sport":"tennis","brand":null,"model":null,"skill_level":"beginner","playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":15000,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"tennis beginner starter kit under 15000","confidence":0.93}
+
+Input: "koi offer ya discount code hai kya"
+Output: {"intent":"coupon","sport":null,"brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"discount offers or coupon codes","confidence":0.92}
+
+Input: "do you do restringing? what strings do you have"
+Output: {"intent":"stringing","sport":"tennis","brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"stringing service and available strings","confidence":0.91}
+
+Input: "what is the head size and weight of wilson clash 100"
+Output: {"intent":"tech","sport":"tennis","brand":"Wilson","model":"Clash 100","skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"Wilson Clash 100 head size and weight specs","confidence":0.97}
 
 Now normalize the customer's message. Respond with ONLY the JSON, no other text.`;
 
