@@ -1192,42 +1192,69 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const sportKey = String(sport || 'tennis').toLowerCase();
     const searchAllCats = !!size || sportKey === 'all';
 
-    const filters = [];
-    let idx = 0;
+    // v6.1.5: When fetching ALL categories, fetch each SEPARATELY so we can
+    // tag each product with the correct sport for URL generation.
+    // Magento REST API doesn't return category_ids, so this is the only way
+    // to know which sport a shoe belongs to.
+    const _sportForSku = {};  // sku -> sport
+
+    const buildShoeParams = (catId) => {
+      const f = [];
+      let i = 0;
+      f.push({ group: i++, field: 'category_id', value: String(catId) });
+      f.push({ group: i++, field: 'status', value: 1 });
+      f.push({ group: i++, field: 'visibility', value: 4 });
+      if (brand) {
+        const bid = brandNameToId(brand);
+        if (bid) f.push({ group: i++, field: 'brands', value: bid });
+      }
+      const specMap = { shoe_type, court_type, width, cushioning };
+      for (const [code, val] of Object.entries(specMap)) {
+        if (!val) continue;
+        const optMap = ATTR_OPTIONS[code] || {};
+        const match = Object.entries(optMap).find(([, label]) => String(label).toLowerCase() === String(val).toLowerCase())
+                   || Object.entries(optMap).find(([, label]) => String(label).toLowerCase().includes(String(val).toLowerCase()));
+        if (match) f.push({ group: i++, field: code, value: match[0] });
+      }
+      const p = {
+        'searchCriteria[pageSize]': 50,
+        'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
+      };
+      f.forEach(ff => {
+        p[`searchCriteria[filter_groups][${ff.group}][filters][0][field]`] = ff.field;
+        p[`searchCriteria[filter_groups][${ff.group}][filters][0][value]`] = ff.value;
+        if (ff.conditionType) p[`searchCriteria[filter_groups][${ff.group}][filters][0][conditionType]`] = ff.conditionType;
+      });
+      return p;
+    };
+
+    let result;
     if (searchAllCats) {
-      filters.push({ group: idx++, field: 'category_id', value: '24,253,274', conditionType: 'in' });
+      // Fetch each category separately in parallel — tag each SKU with its sport
+      const catEntries = Object.entries(SHOE_CATEGORIES); // [['tennis',24],['pickleball',253],['padel',274]]
+      const catResults = await Promise.allSettled(
+        catEntries.map(([, catId]) => magentoGet('/products', buildShoeParams(catId)))
+      );
+      const allItems = [];
+      const seen = new Set();
+      for (let ci = 0; ci < catEntries.length; ci++) {
+        const [catSport] = catEntries[ci];
+        if (catResults[ci].status === 'fulfilled') {
+          for (const item of (catResults[ci].value.items || [])) {
+            if (!seen.has(item.sku)) {
+              seen.add(item.sku);
+              _sportForSku[item.sku] = catSport;
+              allItems.push(item);
+            }
+          }
+        }
+      }
+      result = { items: allItems, total_count: allItems.length };
     } else {
       const catId = SHOE_CATEGORIES[sportKey] || 24;
-      filters.push({ group: idx++, field: 'category_id', value: String(catId) });
-    }
-    filters.push({ group: idx++, field: 'status', value: 1 });
-    filters.push({ group: idx++, field: 'visibility', value: 4 });
-
-    if (brand) {
-      const bid = brandNameToId(brand);
-      if (bid) filters.push({ group: idx++, field: 'brands', value: bid });
-    }
-    const specMap = { shoe_type, court_type, width, cushioning };
-    for (const [code, val] of Object.entries(specMap)) {
-      if (!val) continue;
-      const optMap = ATTR_OPTIONS[code] || {};
-      const match = Object.entries(optMap).find(([, label]) => String(label).toLowerCase() === String(val).toLowerCase())
-                 || Object.entries(optMap).find(([, label]) => String(label).toLowerCase().includes(String(val).toLowerCase()));
-      if (match) filters.push({ group: idx++, field: code, value: match[0] });
+      result = await magentoGet('/products', buildShoeParams(catId));
     }
 
-    // Fetch a large pool - up to 50 configurables
-    const params = {
-      'searchCriteria[pageSize]': 50,
-      'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
-    };
-    filters.forEach(f => {
-      params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
-      params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
-      if (f.conditionType) params[`searchCriteria[filter_groups][${f.group}][filters][0][conditionType]`] = f.conditionType;
-    });
-
-    const result = await magentoGet('/products', params);
     if (!result.items || result.items.length === 0) {
       return { products: [], total: 0, message: `No ${sport} shoes found.` };
     }
@@ -1245,7 +1272,9 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       const stockItem = item.extension_attributes?.stock_item;
       const magentoSaysInStock = stockItem ? !!stockItem.is_in_stock : true; // default trust if no stock_item
       const effectiveQty = (qty >= 1) ? qty : (magentoSaysInStock ? 1 : 0);
-      return shapeProduct(item, effectiveQty, sport);
+      // v6.1.5: Use per-SKU sport from category fetch, or fallback to function param
+      const itemSport = _sportForSku[item.sku] || sport;
+      return shapeProduct(item, effectiveQty, itemSport);
     });
 
     // Enrich configurables to get child prices (CAP=15)
@@ -1866,6 +1895,13 @@ async function executeFunction(name, args, sport = 'tennis') {
 // No extra LLM round-trip ÃÂ¢ÃÂÃÂ pure regex/keyword scoring, so latency stays flat.
 const INTENT_RULES = [
   // intent,            patterns (match any),                                     forceTool,                                        hint
+  // v6.1.5: Sport-specific shoe intents BEFORE generic shoe — more specific wins
+  { intent: 'padel_shoe',
+    rx: [/\bpadel\b.*(shoe|shoes|footwear|sneaker)/i, /(shoe|shoes|footwear|sneaker).*\bpadel\b/i],
+    force: 'get_shoes_with_specs', hintArgs: { sport: 'padel' } },
+  { intent: 'pickleball_shoe',
+    rx: [/pickle\s*ball.*(shoe|shoes|footwear|sneaker)/i, /(shoe|shoes|footwear|sneaker).*pickle/i],
+    force: 'get_shoes_with_specs', hintArgs: { sport: 'pickleball' } },
   { intent: 'shoe',
     rx: [/\b(shoe|shoes|footwear|sneaker|sneakers|trainer|trainers)\b/i, /sports?\s+shoe/i, /court\s+shoe/i],
     force: 'get_shoes_with_specs' },
