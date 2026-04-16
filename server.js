@@ -1196,7 +1196,7 @@ async function enrichConfigurables(products, forceAll = true) {
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
   // dropped enrichments mean dropped products — so we must enrich more, faster.
-  const CAP = 25;
+  const CAP = 15;
   const CONCURRENCY = 10;
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
@@ -1246,7 +1246,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 7000); }
+        try { await withTimeout(enrichOne(item), 5000); }
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
@@ -1583,7 +1583,7 @@ const INTENT_RULES = [
     rx: [/ball\s*machine/i, /ball\s*thrower/i, /ball\s*cannon/i, /ball\s*launcher/i, /ball\s*feeder/i, /\btenniix\b/i, /\bai\s*ball\b/i, /smart\s*ball/i],
     force: 'get_ball_machines' },
   { intent: 'pickleball_paddle',
-    rx: [/pickle\s*ball.*paddle/i, /paddle.*pickle/i, /pickleball\s+paddle/i, /paddleball\s+paddle/i, /pickle\s*paddle/i],
+    rx: [/pickle\s*ball.*paddle/i, /paddle.*pickle/i, /pickleball\s+paddle/i, /paddleball\s*paddle/i, /paddle\s*ball\s*paddle/i, /pickle\s*paddle/i, /paddleball/i],
     force: 'get_racquets_with_specs', hintArgs: { sport: 'pickleball' } },
   { intent: 'padel_racket',
     rx: [/\bpadel\b.*(racket|racquet)/i, /(racket|racquet).*\bpadel\b/i],
@@ -1653,7 +1653,7 @@ app.post('/api/chat', async (req, res) => {
     const lowerUser = lastUser.toLowerCase();
     const mentionsSize = /\b(size|sz)\s*\d+|\bsize\b|\buk\s*\d+|\bus\s*\d+|\beu\s*\d+/i.test(lastUser);
     const mentionsShoe = /shoe|footwear|sneaker/i.test(lowerUser);
-    const mentionsPickle = /pickleball|pickle/i.test(lowerUser);
+    const mentionsPickle = /pickleball|pickle|paddleball|paddle\s*ball/i.test(lowerUser);
     const mentionsPadel = /padel/i.test(lowerUser);
 
     let forceToolChoice = 'auto';
@@ -1722,6 +1722,10 @@ app.post('/api/chat', async (req, res) => {
         const funcName = toolCall.function.name;
         let funcArgs = {};
         try { funcArgs = JSON.parse(toolCall.function.arguments); } catch {}
+        // Override LLM args with deterministic hintArgs from INTENT_RULES (e.g. paddleball→pickleball)
+        if (classification.top && classification.top.hintArgs && classification.top.force === funcName) {
+          Object.assign(funcArgs, classification.top.hintArgs);
+        }
         console.log(`[Call] ${funcName}(${JSON.stringify(funcArgs)})`);
         const result = await executeFunction(funcName, funcArgs);
         console.log(`[Result] ${funcName}: ${JSON.stringify(result).substring(0, 200)}...`);
