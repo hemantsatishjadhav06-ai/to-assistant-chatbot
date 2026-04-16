@@ -105,6 +105,7 @@ async function normalizeQuery(userText, conversationHistory = []) {
       headers: {
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
         'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://tennisoutlet.in',
         'X-Title': 'TO Assistant (normalizer)'
       },
       timeout: 8000
