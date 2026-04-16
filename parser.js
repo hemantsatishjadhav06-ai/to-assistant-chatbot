@@ -127,6 +127,8 @@ function extractCategory(text) {
 
 function extractSport(text) {
   for (const [k, re] of Object.entries(SPORTS)) if (re.test(text)) return k;
+  // "sports shoe", "sport shoes" without specific sport => 'all' (search all stores)
+  if (/\bsports?\s+(shoe|shoes|footwear|sneaker)/i.test(text)) return 'all';
   return null;
 }
 
