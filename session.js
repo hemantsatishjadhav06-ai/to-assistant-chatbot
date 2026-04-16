@@ -1,17 +1,17 @@
-// session.js — in-memory conversation session store with TTL.
-// Rationale: premature persistence is a trap. Most chatbot "memory" needs
-// (carry slots across 2-3 turns, remember what we just showed the user) are
-// solved by a keyed Map on the server instance. Supabase/Redis become useful
-// only when we need (a) multi-instance horizontal scaling, (b) cross-session
-// history, or (c) analytics on conversations.
+// session.js — in-memory conversation session store with TTL + conversation history.
+//
+// v2: Added `history` array to store recent conversation turns server-side.
+// This means even if the client sends only the latest message, the server
+// can reconstruct the full conversation context for the LLM.
 //
 // If/when Render scales to >1 instance, swap this module for a Redis/Supabase
 // adapter exposing the same interface: get(id), set(id, patch), reset(id).
 
 const DEFAULT_TTL_MS = 30 * 60 * 1000;   // 30 minutes since last touch
 const MAX_SESSIONS = 5000;                // hard cap before oldest-first eviction
+const MAX_HISTORY_TURNS = 20;             // keep last 20 message pairs (40 messages max)
 
-const store = new Map(); // id -> { slots, lastShown, turns, createdAt, updatedAt }
+const store = new Map(); // id -> { slots, lastShown, turns, history, createdAt, updatedAt }
 
 function now() { return Date.now(); }
 
@@ -40,7 +40,7 @@ function getOrCreate(id) {
   let s = store.get(id);
   if (!s) {
     evictIfNeeded();
-    s = { slots: {}, lastShown: [], turns: 0, createdAt: now(), updatedAt: now() };
+    s = { slots: {}, lastShown: [], turns: 0, history: [], createdAt: now(), updatedAt: now() };
     store.set(id, s);
   }
   return s;
@@ -48,7 +48,7 @@ function getOrCreate(id) {
 
 function get(id) {
   const s = store.get(id);
-  if (!s) return { slots: {}, lastShown: [], turns: 0 };
+  if (!s) return { slots: {}, lastShown: [], turns: 0, history: [] };
   s.updatedAt = now();
   return s;
 }
@@ -61,6 +61,55 @@ function update(id, patch) {
   s.turns = (s.turns || 0) + 1;
   s.updatedAt = now();
   return s;
+}
+
+// ===== NEW: Conversation history management =====
+
+/**
+ * Add a message to the session's conversation history.
+ * @param {string} id - Session ID
+ * @param {string} role - 'user' or 'assistant'
+ * @param {string} content - Message text
+ */
+function addMessage(id, role, content) {
+  const s = getOrCreate(id);
+  if (!s || !content) return;
+  s.history.push({ role, content, ts: now() });
+  // Trim to last MAX_HISTORY_TURNS * 2 messages (user+assistant pairs)
+  const maxMessages = MAX_HISTORY_TURNS * 2;
+  if (s.history.length > maxMessages) {
+    s.history = s.history.slice(-maxMessages);
+  }
+  s.updatedAt = now();
+}
+
+/**
+ * Get the conversation history for a session.
+ * Returns messages in OpenAI chat format: [{ role, content }, ...]
+ * @param {string} id - Session ID
+ * @returns {Array} - Message history
+ */
+function getHistory(id) {
+  const s = store.get(id);
+  if (!s) return [];
+  return s.history.map(({ role, content }) => ({ role, content }));
+}
+
+/**
+ * Replace the full history (e.g., when client sends complete history).
+ * @param {string} id - Session ID
+ * @param {Array} messages - [{ role, content }, ...]
+ */
+function setHistory(id, messages) {
+  const s = getOrCreate(id);
+  if (!s) return;
+  const maxMessages = MAX_HISTORY_TURNS * 2;
+  s.history = messages.slice(-maxMessages).map(m => ({
+    role: m.role,
+    content: m.content,
+    ts: now()
+  }));
+  s.updatedAt = now();
 }
 
 function reset(id) {
@@ -81,4 +130,4 @@ function fallbackId(req) {
   return `ip:${ip}`;
 }
 
-module.exports = { get, update, reset, stats, fallbackId, getOrCreate };
+module.exports = { get, update, reset, stats, fallbackId, getOrCreate, addMessage, getHistory, setHistory };
