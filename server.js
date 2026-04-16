@@ -1452,6 +1452,16 @@ app.post('/api/chat-agents', async (req, res) => {
     // Persist merged slots for next turn.
     sessionStore.update(sessionId, { slots: merged });
 
+    // ===== v5.0.1: Smart order intent detection =====
+    // If user says "order status" / "track" / "status" and session already has order_id,
+    // force intent to 'order' even if the current message doesn't contain the ID.
+    if (!merged.intent_hint && merged.order_id &&
+        /\b(order|status|track|tracking|dispatch|shipment|delivery|where is)\b/i.test(lastUser)) {
+      merged.intent_hint = 'order';
+      merged._rendered = slotParser.renderSlotsHint(merged);
+      console.log(`[session:${sessionId}] forced order intent — order_id=${merged.order_id} from session`);
+    }
+
     // ===== v4.8: Server-side conversation memory =====
     // Build full conversation from server-side history + new message(s).
     // If client sends only the latest user message, we prepend stored history.
