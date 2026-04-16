@@ -210,8 +210,25 @@ function parseSlots(text) {
 // Merge session slots with freshly parsed ones. Fresh values win where present.
 // "reset words" clear prior state.
 function mergeSlots(prior = {}, fresh = {}) {
-  const RESET = /\b(reset|start over|new search|clear|forget|different)\b/i;
   const merged = { ...prior };
+
+  // v6.0.1: INTENT CHANGE DETECTION — when the user switches topics
+  // (e.g. racquet -> bag, shoe -> order), wipe stale filters that would
+  // pollute the new query. Price, brand, size, skill, style, playing style
+  // are all topic-specific and must not carry over to a different intent.
+  const priorIntent = prior.intent_hint || prior.category;
+  const freshIntent = fresh.intent_hint || fresh.category;
+  const intentChanged = freshIntent && priorIntent && freshIntent !== priorIntent;
+
+  if (intentChanged) {
+    // Wipe product-specific slots — keep session-level ones (order_id, sport)
+    const wipeKeys = ['brand', 'model', 'size', 'min_price', 'max_price',
+      'skill_level', 'playing_style', 'gender', 'court_type', 'quantity',
+      'sort', 'normalized_query', '_page_size', '_follow_up'];
+    for (const k of wipeKeys) { delete merged[k]; }
+    console.log(`[mergeSlots] intent changed ${priorIntent} -> ${freshIntent}, wiped stale filters`);
+  }
+
   for (const [k, v] of Object.entries(fresh)) {
     if (v !== null && v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0)) {
       merged[k] = v;
@@ -297,23 +314,46 @@ function slotsFromSpec(spec, existingSlots = {}) {
       racquet: 'racquet', shoe: 'shoe', ball: 'catalog', string: 'catalog',
       bag: 'catalog', overgrip: 'catalog', accessory: 'catalog',
       ball_machine: 'catalog', order: 'order', policy: 'policy',
-      brand: 'brand', review: 'review', greeting: 'greeting', other: 'other'
+      brand: 'brand', review: 'review', greeting: 'greeting', other: 'other',
+      // v6.0.0: new intents
+      availability: 'availability', comparison: 'comparison', starter_kit: 'starter_kit',
+      coupon: 'coupon', stringing: 'stringing', tech: 'tech'
     };
     out.intent_hint = intentMap[spec.intent] || out.intent_hint;
   }
 
-  // Straightforward field copies — spec wins when parser is null
-  if (spec.sport && !out.sport) out.sport = spec.sport;
-  if (spec.brand && !out.brand) out.brand = spec.brand;
-  if (spec.model && !out.model) out.model = spec.model;
-  if (spec.skill_level && !out.skill_level) out.skill_level = spec.skill_level;
-  if (spec.playing_style && !out.playing_style) out.playing_style = spec.playing_style;
-  if (spec.size && !out.size) out.size = spec.size;
-  if (spec.gender && !out.gender) out.gender = spec.gender;
-  if (spec.min_price != null && out.min_price == null) out.min_price = spec.min_price;
-  if (spec.max_price != null && out.max_price == null) out.max_price = spec.max_price;
-  if (spec.quantity != null && out.quantity == null) out.quantity = spec.quantity;
-  if (spec.order_id && !out.order_id) out.order_id = spec.order_id;
+  // v6.0.1: When normalizer says this is NOT a follow-up (confidence >= 0.7),
+  // treat the spec as authoritative — OVERWRITE stale slots, including nulls.
+  // This fixes the "Adidas Multigame Bag" bug where old price filters persisted.
+  const isNewQuery = !spec.is_follow_up && (spec.confidence || 0) >= 0.7;
+
+  if (isNewQuery) {
+    // Authoritative overwrite — spec wins for ALL fields, including nulls that clear old values
+    if (spec.sport) out.sport = spec.sport;
+    if (spec.brand) out.brand = spec.brand; else delete out.brand;
+    if (spec.model) out.model = spec.model; else delete out.model;
+    if (spec.skill_level) out.skill_level = spec.skill_level; else delete out.skill_level;
+    if (spec.playing_style) out.playing_style = spec.playing_style; else delete out.playing_style;
+    if (spec.size) out.size = spec.size; else delete out.size;
+    if (spec.gender) out.gender = spec.gender; else delete out.gender;
+    if (spec.min_price != null) out.min_price = spec.min_price; else delete out.min_price;
+    if (spec.max_price != null) out.max_price = spec.max_price; else delete out.max_price;
+    if (spec.quantity != null) out.quantity = spec.quantity; else delete out.quantity;
+    if (spec.order_id) out.order_id = spec.order_id;
+  } else {
+    // Follow-up mode — spec fills gaps only (original behavior)
+    if (spec.sport && !out.sport) out.sport = spec.sport;
+    if (spec.brand && !out.brand) out.brand = spec.brand;
+    if (spec.model && !out.model) out.model = spec.model;
+    if (spec.skill_level && !out.skill_level) out.skill_level = spec.skill_level;
+    if (spec.playing_style && !out.playing_style) out.playing_style = spec.playing_style;
+    if (spec.size && !out.size) out.size = spec.size;
+    if (spec.gender && !out.gender) out.gender = spec.gender;
+    if (spec.min_price != null && out.min_price == null) out.min_price = spec.min_price;
+    if (spec.max_price != null && out.max_price == null) out.max_price = spec.max_price;
+    if (spec.quantity != null && out.quantity == null) out.quantity = spec.quantity;
+    if (spec.order_id && !out.order_id) out.order_id = spec.order_id;
+  }
 
   // Follow-up metadata
   if (spec.is_follow_up) {
