@@ -605,7 +605,7 @@ async function magentoGet(endpoint, params = {}) {
       'Accept': 'application/json'
     },
     params,
-    timeout: 10000   // v5.5.0: tighter for Render 30s gateway limit
+    timeout: 6000   // v5.6.1: 10s→6s — Render 30s budget is tight
   });
   return response.data;
 }
@@ -1197,8 +1197,8 @@ async function enrichConfigurables(products, forceAll = true) {
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
   // dropped enrichments mean dropped products — so we must enrich more, faster.
-  const CAP = 5;
-  const CONCURRENCY = 5;
+  const CAP = 3;        // v5.6.1: slashed from 5→3 to fit Render 30s window
+  const CONCURRENCY = 3;
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1247,7 +1247,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 3000); }
+        try { await withTimeout(enrichOne(item), 2000); }  // v5.6.1: 3s→2s per item
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
@@ -1917,8 +1917,8 @@ app.post('/api/chat-agents', async (req, res) => {
       ? `${sessionHint || ''} [NORMALIZED SPEC — USE THESE VALUES VERBATIM] ${specBits.join(', ')}`
       : sessionHint;
 
-    // v5.5.0: 27s deadline so we respond before Render's 30s gateway kills us.
-    const DEADLINE_MS = 27000;
+    // v5.6.1: 28s deadline — pipeline is faster now with no retry, so we can use more of Render's 30s window.
+    const DEADLINE_MS = 28000;
     const deadline = new Promise((_, reject) => setTimeout(() => reject(new Error('deadline_exceeded')), DEADLINE_MS));
     const result = await Promise.race([
       masterHandle({
