@@ -1374,6 +1374,14 @@ app.post('/api/chat', async (req, res) => {
 });
 
 // ==================== MULTI-AGENT CHAT ====================
+// GET conversation history for a session (for page reconnect / restore)
+app.get('/api/session-history', (req, res) => {
+  const sessionId = sessionStore.fallbackId(req);
+  const history = sessionStore.getHistory(sessionId);
+  const slots = sessionStore.get(sessionId).slots || {};
+  res.json({ session_id: sessionId, history, slots });
+});
+
 app.post('/api/chat-agents', async (req, res) => {
   try {
     const { messages } = req.body;
@@ -1398,21 +1406,47 @@ app.post('/api/chat-agents', async (req, res) => {
     // Persist merged slots for next turn.
     sessionStore.update(sessionId, { slots: merged });
 
+    // ===== v4.8: Server-side conversation memory =====
+    // Build full conversation from server-side history + new message(s).
+    // If client sends only the latest user message, we prepend stored history.
+    // If client sends full history, we use it as-is and sync to server store.
+    const serverHistory = sessionStore.getHistory(sessionId);
+    let fullMessages;
+
+    if (messages.length <= 2) {
+      // Client sent only latest turn(s) — prepend server-side history
+      fullMessages = [...serverHistory, ...messages];
+    } else {
+      // Client sent full history — use it and sync to server
+      fullMessages = messages;
+      sessionStore.setHistory(sessionId, messages.filter(m => m.role !== 'system'));
+    }
+
+    // Save the latest user message to server history
+    if (lastUser) {
+      sessionStore.addMessage(sessionId, 'user', lastUser);
+    }
+
     // Humanized session hint for the LLM (only if there's prior context).
     const turns = sessionStore.get(sessionId).turns || 0;
     const sessionHint = (turns > 1 && prior && Object.keys(prior).some(k => prior[k] != null && k !== '_rendered'))
       ? `Previous turn slots: ${slotParser.renderSlotsHint(prior) || '(none)'}. Current merged slots: ${merged._rendered || '(none)'}`
       : '';
 
-    console.log(`[session:${sessionId}] turn=${turns} slots={${merged._rendered}}`);
+    console.log(`[session:${sessionId}] turn=${turns} history=${serverHistory.length}msgs slots={${merged._rendered}}`);
 
     const result = await masterHandle({
-      userMessages: messages,
+      userMessages: fullMessages,
       allTools: FUNCTION_DEFINITIONS,
       executeFunction,
       slots: merged,
       sessionHint
     });
+
+    // Save assistant response to server history
+    if (result.message) {
+      sessionStore.addMessage(sessionId, 'assistant', result.message);
+    }
 
     // Attach session id so clients can pin it across turns if they want.
     res.json({ ...result, session_id: sessionId, slots: merged });
