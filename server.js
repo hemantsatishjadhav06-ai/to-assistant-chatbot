@@ -78,17 +78,116 @@ function getStoreUrl(sport) {
   return getStoreConfig(sport).storeUrl;
 }
 
-// v6.1.1: Detect sport from product's category_ids — ensures correct store URL
-// Maps known category IDs to their sport. Products in padel/pickleball categories
-// get padeloutlet.in / pickleballoutlet.in URLs, NOT tennisoutlet.in.
+// v6.1.2: COMPLETE category-to-sport mapping from Magento category tree.
+// Every category ID mapped to its correct store URL.
+// Padel categories -> padeloutlet.in | Pickleball -> pickleballoutlet.in | Tennis -> tennisoutlet.in
 const CATEGORY_TO_SPORT = {
-  // Padel
-  245: 'padel', 272: 'padel', 273: 'padel', 274: 'padel',
-  // Pickleball
-  243: 'pickleball', 250: 'pickleball', 252: 'pickleball', 253: 'pickleball',
-  // Tennis (everything else defaults to tennis, but explicit mapping for key categories)
-  24: 'tennis', 25: 'tennis', 26: 'tennis', 29: 'tennis', 31: 'tennis',
-  34: 'tennis', 35: 'tennis', 37: 'tennis', 66: 'tennis', 115: 'tennis', 336: 'tennis'
+  // ===== PADEL OUTLET (padeloutlet.in) =====
+  // Padel Outlet root
+  245: 'padel',
+  // Rackets (272) + brand subcats
+  272: 'padel', 277: 'padel', 278: 'padel', 279: 'padel', 280: 'padel',
+  303: 'padel', 329: 'padel', 331: 'padel', 339: 'padel', 427: 'padel',
+  // Balls (273) + brand subcats
+  273: 'padel', 281: 'padel', 282: 'padel', 283: 'padel', 284: 'padel',
+  313: 'padel', 360: 'padel', 428: 'padel', 453: 'padel',
+  // Shoes (274) + brand subcats
+  274: 'padel', 287: 'padel', 288: 'padel', 289: 'padel', 290: 'padel',
+  291: 'padel', 314: 'padel', 367: 'padel', 424: 'padel',
+  // Bags (275) + brand subcats
+  275: 'padel', 304: 'padel', 305: 'padel', 306: 'padel', 318: 'padel',
+  330: 'padel', 369: 'padel',
+  // Accessories, Sale, Collections, Best Sellers
+  276: 'padel', 363: 'padel', 375: 'padel', 432: 'padel', 436: 'padel', 452: 'padel',
+
+  // ===== PICKLEBALL OUTLET (pickleballoutlet.in) =====
+  // Pickle Ball Outlet root
+  243: 'pickleball',
+  // Paddles (250) + brand subcats
+  250: 'pickleball', 257: 'pickleball', 258: 'pickleball', 259: 'pickleball',
+  260: 'pickleball', 261: 'pickleball', 262: 'pickleball', 302: 'pickleball',
+  307: 'pickleball', 332: 'pickleball', 333: 'pickleball', 345: 'pickleball',
+  351: 'pickleball', 354: 'pickleball', 355: 'pickleball', 356: 'pickleball',
+  357: 'pickleball', 394: 'pickleball', 400: 'pickleball', 407: 'pickleball',
+  426: 'pickleball', 438: 'pickleball', 439: 'pickleball', 441: 'pickleball',
+  445: 'pickleball', 447: 'pickleball',
+  // Balls (252) + brand subcats
+  252: 'pickleball', 263: 'pickleball', 264: 'pickleball', 265: 'pickleball',
+  266: 'pickleball', 311: 'pickleball', 312: 'pickleball', 350: 'pickleball',
+  388: 'pickleball', 403: 'pickleball', 440: 'pickleball', 448: 'pickleball',
+  // Shoes (253) + brand subcats
+  253: 'pickleball', 267: 'pickleball', 268: 'pickleball', 269: 'pickleball',
+  270: 'pickleball', 271: 'pickleball', 365: 'pickleball', 404: 'pickleball',
+  // Bags (254) + brand subcats
+  254: 'pickleball', 308: 'pickleball', 309: 'pickleball', 310: 'pickleball',
+  334: 'pickleball', 340: 'pickleball', 352: 'pickleball', 405: 'pickleball',
+  // Net & Post, Accessories, Promotional, Sale, Bloom, Best Sellers, etc.
+  255: 'pickleball', 256: 'pickleball', 328: 'pickleball', 353: 'pickleball',
+  389: 'pickleball', 393: 'pickleball', 399: 'pickleball', 406: 'pickleball',
+  429: 'pickleball', 431: 'pickleball', 435: 'pickleball', 446: 'pickleball',
+  455: 'pickleball',
+  // Syxx (401) — pickleball brand with own root
+  401: 'pickleball', 402: 'pickleball', 408: 'pickleball', 409: 'pickleball',
+  410: 'pickleball', 411: 'pickleball', 412: 'pickleball', 413: 'pickleball',
+  414: 'pickleball', 415: 'pickleball', 416: 'pickleball', 417: 'pickleball',
+  418: 'pickleball', 419: 'pickleball', 420: 'pickleball', 421: 'pickleball',
+  433: 'pickleball',
+
+  // ===== TENNIS OUTLET (tennisoutlet.in) =====
+  // Racquets (25) + all brand/level subcats
+  25: 'tennis', 26: 'tennis', 34: 'tennis', 35: 'tennis', 44: 'tennis', 45: 'tennis',
+  46: 'tennis', 47: 'tennis', 48: 'tennis', 49: 'tennis', 50: 'tennis', 51: 'tennis',
+  52: 'tennis', 53: 'tennis', 54: 'tennis', 55: 'tennis', 56: 'tennis', 57: 'tennis',
+  58: 'tennis', 59: 'tennis', 60: 'tennis', 61: 'tennis', 62: 'tennis', 63: 'tennis',
+  64: 'tennis', 65: 'tennis', 66: 'tennis', 67: 'tennis', 69: 'tennis', 70: 'tennis',
+  71: 'tennis', 72: 'tennis', 73: 'tennis', 74: 'tennis', 75: 'tennis', 76: 'tennis',
+  77: 'tennis', 78: 'tennis', 79: 'tennis', 80: 'tennis', 81: 'tennis', 82: 'tennis',
+  83: 'tennis', 84: 'tennis', 85: 'tennis', 86: 'tennis', 87: 'tennis', 88: 'tennis',
+  89: 'tennis', 90: 'tennis', 166: 'tennis', 173: 'tennis', 178: 'tennis', 179: 'tennis',
+  180: 'tennis', 181: 'tennis', 210: 'tennis', 211: 'tennis', 212: 'tennis', 213: 'tennis',
+  214: 'tennis', 239: 'tennis', 248: 'tennis', 319: 'tennis', 324: 'tennis', 325: 'tennis',
+  326: 'tennis', 327: 'tennis', 336: 'tennis', 337: 'tennis', 346: 'tennis', 347: 'tennis',
+  348: 'tennis', 358: 'tennis', 359: 'tennis', 364: 'tennis', 370: 'tennis', 376: 'tennis',
+  422: 'tennis', 423: 'tennis',
+  // Strings (29) + brand subcats
+  29: 'tennis', 30: 'tennis', 33: 'tennis', 122: 'tennis', 123: 'tennis', 124: 'tennis',
+  125: 'tennis', 126: 'tennis', 127: 'tennis', 177: 'tennis', 182: 'tennis', 185: 'tennis',
+  186: 'tennis', 187: 'tennis', 188: 'tennis', 189: 'tennis', 190: 'tennis', 191: 'tennis',
+  192: 'tennis', 193: 'tennis', 194: 'tennis', 195: 'tennis', 196: 'tennis', 223: 'tennis',
+  224: 'tennis', 233: 'tennis', 235: 'tennis', 236: 'tennis', 321: 'tennis', 341: 'tennis',
+  342: 'tennis', 343: 'tennis', 344: 'tennis', 371: 'tennis', 372: 'tennis', 373: 'tennis',
+  374: 'tennis',
+  // Shoes (24) + brand subcats
+  24: 'tennis', 28: 'tennis', 103: 'tennis', 104: 'tennis', 105: 'tennis', 106: 'tennis',
+  107: 'tennis', 237: 'tennis', 322: 'tennis',
+  // Balls (31) + brand subcats
+  31: 'tennis', 32: 'tennis', 91: 'tennis', 92: 'tennis', 93: 'tennis', 94: 'tennis',
+  95: 'tennis', 96: 'tennis', 97: 'tennis', 98: 'tennis', 99: 'tennis', 100: 'tennis',
+  101: 'tennis', 102: 'tennis', 361: 'tennis',
+  // Bags (115) + brand subcats
+  115: 'tennis', 116: 'tennis', 117: 'tennis', 118: 'tennis', 119: 'tennis', 120: 'tennis',
+  121: 'tennis',
+  // Clothing (36) + subcats
+  36: 'tennis', 108: 'tennis', 109: 'tennis', 110: 'tennis', 111: 'tennis', 112: 'tennis',
+  113: 'tennis', 114: 'tennis', 368: 'tennis',
+  // Accessories (37) + subcats
+  37: 'tennis', 128: 'tennis', 129: 'tennis', 130: 'tennis', 131: 'tennis', 132: 'tennis',
+  133: 'tennis', 134: 'tennis', 135: 'tennis', 136: 'tennis', 183: 'tennis', 390: 'tennis',
+  // Other (137) + subcats
+  137: 'tennis', 184: 'tennis', 138: 'tennis', 139: 'tennis', 140: 'tennis', 450: 'tennis',
+  // Stringing (38) + all subcats
+  38: 'tennis', 39: 'tennis', 40: 'tennis', 41: 'tennis', 42: 'tennis', 43: 'tennis',
+  197: 'tennis', 198: 'tennis', 199: 'tennis', 200: 'tennis', 201: 'tennis', 202: 'tennis',
+  203: 'tennis', 204: 'tennis', 205: 'tennis', 206: 'tennis', 207: 'tennis', 209: 'tennis',
+  315: 'tennis', 316: 'tennis', 320: 'tennis', 442: 'tennis', 443: 'tennis', 444: 'tennis',
+  // Pro Store, Brands, Clearance, Sales, Best Sellers, Promotions
+  164: 'tennis', 165: 'tennis', 240: 'tennis', 241: 'tennis', 242: 'tennis', 249: 'tennis',
+  292: 'tennis', 293: 'tennis', 294: 'tennis', 295: 'tennis', 296: 'tennis', 297: 'tennis',
+  298: 'tennis', 299: 'tennis', 335: 'tennis', 338: 'tennis', 349: 'tennis', 362: 'tennis',
+  377: 'tennis', 378: 'tennis', 379: 'tennis', 380: 'tennis', 381: 'tennis', 382: 'tennis',
+  383: 'tennis', 384: 'tennis', 386: 'tennis', 387: 'tennis', 391: 'tennis', 392: 'tennis',
+  395: 'tennis', 396: 'tennis', 397: 'tennis', 398: 'tennis', 425: 'tennis', 430: 'tennis',
+  434: 'tennis', 437: 'tennis', 449: 'tennis', 451: 'tennis', 454: 'tennis'
 };
 
 function detectSportFromProduct(item, fallbackSport = 'tennis') {
