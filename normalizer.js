@@ -108,7 +108,7 @@ async function normalizeQuery(userText, conversationHistory = []) {
         'HTTP-Referer': 'https://tennisoutlet.in',
         'X-Title': 'TO Assistant (normalizer)'
       },
-      timeout: 15000  // v5.7.0: no artificial caps
+      timeout: 8000   // v5.7.2: balanced
     });
 
     const raw = res.data.choices[0].message.content;
