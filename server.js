@@ -866,6 +866,12 @@ function shapeProduct(item, qty, sport = 'tennis') {
       .filter(Boolean);
   }
   if (Object.keys(shoeSpecs).length) shaped.specs = shoeSpecs;
+  // v6.0.5: Show lowest selling price — if special_price exists and is lower, use it as main price
+  if (shaped.special_price && shaped.special_price > 0 && (!shaped.price || shaped.special_price < shaped.price)) {
+    shaped.original_price = shaped.price;
+    shaped.price = shaped.special_price;
+  }
+  delete shaped.special_price;  // LLM only sees one price field — the lowest
   return shaped;
 }
 
@@ -1248,6 +1254,12 @@ async function enrichConfigurables(products, forceAll = true) {
       }
       const sp = children.map(c => parseFloat(c.special_price || 0)).filter(v => v > 0);
       if (sp.length && !p.special_price) p.special_price = Math.min(...sp);
+      // v6.0.5: resolve to lowest selling price after enrichment
+      if (p.special_price && p.special_price > 0 && (!p.price || p.special_price < p.price)) {
+        p.original_price = p.price;
+        p.price = p.special_price;
+      }
+      delete p.special_price;
       // Stock: per-child and summed. ALWAYS override parent qty with children total.
       // This corrects false positives from /stockItems (is_in_stock=true but children OOS).
       let stockMap = {};
