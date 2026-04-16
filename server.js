@@ -313,6 +313,24 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
   {
     type: "function",
     function: {
+      name: "smart_product_search",
+      description: "PREFERRED product discovery tool. Resolves natural-language queries to the best Magento categories using an in-memory index, fetches from those categories AND runs a keyword search, then merges and deduplicates. Use this FIRST for any general product query (e.g. 'tennis bags', 'padel balls', 'sale items', 'strings under 2000'). Falls back to keyword search if no category matches. Returns products with product_url, price, qty, and source info.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Natural-language product query (e.g. 'beginner tennis racquets', 'padel balls', 'used racquets', 'wimbledon sale')" },
+          sport: { type: "string", enum: ["tennis", "pickleball", "padel"], description: "Sport context for URL generation." },
+          min_price: { type: "number", description: "Optional minimum price in INR." },
+          max_price: { type: "number", description: "Optional maximum price in INR. '5K'=5000, '1L'=100000." },
+          page_size: { type: "integer", description: "Max products (default 10, max 20)", default: 10 }
+        },
+        required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
       name: "find_categories",
       description: "Search the Magento category tree by keyword and return matching category IDs + paths. Use when you need to discover the exact category ID for an unusual product type (e.g. 'pressureless balls', 'kids racquets').",
       parameters: {
@@ -399,16 +417,86 @@ function extractCustomAttrs(item) {
   return attrs;
 }
 
-// ==================== CATEGORY MAP (v3.3.2) ====================
-// Walks the Magento category tree once at startup so we can discover
-// categories by keyword instead of hard-coding IDs everywhere.
-// CATEGORY_MAP = [{ id, name, level, parent_id, path, url_key }]
+// ==================== CATEGORY INDEX (v5.4.0) ====================
+// CATEGORY_MAP = flat list; CATEGORY_INDEX = inverted keyword→[{id,name,score}] for O(1) resolution.
 let CATEGORY_MAP = [];
 const BALL_MACHINE_CATEGORY_IDS = [];
+let CATEGORY_INDEX = {};  // keyword → [{ id, name, score }]
+
+// Build the inverted index from the flat category list.
+function buildCategoryIndex(cats) {
+  const idx = {};
+  const stopwords = new Set(['the','and','or','for','a','an','in','on','to','of','with','by','at','from','is','it','as']);
+  for (const c of cats) {
+    if (!c.is_active || c.level < 2) continue;
+    // Tokenise: name tokens + path tokens (lower, alphanumeric only)
+    const tokens = new Set();
+    const raw = `${c.name} ${c.path || ''}`.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/);
+    for (const t of raw) {
+      if (t.length >= 2 && !stopwords.has(t)) tokens.add(t);
+    }
+    // Also add bigrams from name (e.g. "pure aero", "ball machine")
+    const nameTokens = c.name.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(t => t.length >= 2);
+    for (let i = 0; i < nameTokens.length - 1; i++) {
+      tokens.add(`${nameTokens[i]} ${nameTokens[i + 1]}`);
+    }
+    for (const token of tokens) {
+      if (!idx[token]) idx[token] = [];
+      // Score: deeper = more specific = better; product_count as tiebreaker
+      const score = c.level * 10 + Math.min(c.product_count || 0, 99);
+      idx[token].push({ id: c.id, name: c.name, path: c.path, score, product_count: c.product_count });
+    }
+  }
+  // Sort each bucket by score descending
+  for (const key of Object.keys(idx)) {
+    idx[key].sort((a, b) => b.score - a.score);
+  }
+  return idx;
+}
+
+// Resolve a natural-language query to the best category IDs using the inverted index.
+function resolveCategoriesFromQuery(query, maxResults = 3) {
+  if (!query || !CATEGORY_INDEX || Object.keys(CATEGORY_INDEX).length === 0) return [];
+  const q = String(query).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
+  const queryTokens = q.split(/\s+/).filter(t => t.length >= 2);
+  if (queryTokens.length === 0) return [];
+
+  // Score each category by how many query tokens it matches
+  const catScores = {};  // catId → { ...catInfo, matchCount, totalScore }
+
+  // Try bigrams first (more specific)
+  for (let i = 0; i < queryTokens.length - 1; i++) {
+    const bigram = `${queryTokens[i]} ${queryTokens[i + 1]}`;
+    if (CATEGORY_INDEX[bigram]) {
+      for (const cat of CATEGORY_INDEX[bigram]) {
+        if (!catScores[cat.id]) catScores[cat.id] = { ...cat, matchCount: 0, totalScore: 0 };
+        catScores[cat.id].matchCount += 2;  // bigram match counts double
+        catScores[cat.id].totalScore += cat.score * 2;
+      }
+    }
+  }
+
+  // Then unigrams
+  for (const token of queryTokens) {
+    if (CATEGORY_INDEX[token]) {
+      for (const cat of CATEGORY_INDEX[token]) {
+        if (!catScores[cat.id]) catScores[cat.id] = { ...cat, matchCount: 0, totalScore: 0 };
+        catScores[cat.id].matchCount += 1;
+        catScores[cat.id].totalScore += cat.score;
+      }
+    }
+  }
+
+  // Rank by matchCount desc, then totalScore desc
+  const ranked = Object.values(catScores)
+    .sort((a, b) => b.matchCount - a.matchCount || b.totalScore - a.totalScore)
+    .slice(0, maxResults);
+
+  return ranked.map(c => ({ id: c.id, name: c.name, path: c.path, product_count: c.product_count, match_score: c.matchCount }));
+}
 
 async function initCategoryMap() {
   try {
-    // /V1/categories returns the root tree (recursive). Walk it.
     const res = await axios.get(`${MAGENTO_REST}/categories`, {
       headers: { 'Authorization': `Bearer ${MAGENTO_TOKEN}`, 'Accept': 'application/json' },
       timeout: 20000
@@ -430,15 +518,18 @@ async function initCategoryMap() {
     };
     walk(res.data);
     CATEGORY_MAP = flat;
-    console.log(`[category-map] loaded ${flat.length} categories`);
 
-    // Detect ball-machine-like categories by name (also match 'ai ball', 'smart ball').
+    // Build inverted index for O(1) query→category resolution
+    CATEGORY_INDEX = buildCategoryIndex(flat);
+    console.log(`[category-index] loaded ${flat.length} categories, ${Object.keys(CATEGORY_INDEX).length} index keys`);
+
+    // Detect ball-machine-like categories by name
     BALL_MACHINE_CATEGORY_IDS.length = 0;
     const re = /ball.?machine|ball.?thrower|ball.?cannon|ball.?launcher|ball.?feeder|ai.?ball|smart.?ball/i;
     for (const c of flat) if (re.test(c.name)) BALL_MACHINE_CATEGORY_IDS.push(c.id);
-    console.log(`[category-map] ball-machine category ids: ${JSON.stringify(BALL_MACHINE_CATEGORY_IDS)}`);
+    console.log(`[category-index] ball-machine category ids: ${JSON.stringify(BALL_MACHINE_CATEGORY_IDS)}`);
   } catch (e) {
-    console.log(`[category-map] failed:`, e.response?.status || e.message);
+    console.log(`[category-index] failed:`, e.response?.status || e.message);
   }
 }
 
@@ -1105,8 +1196,8 @@ async function enrichConfigurables(products, forceAll = true) {
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
   // dropped enrichments mean dropped products — so we must enrich more, faster.
-  const CAP = 30;
-  const CONCURRENCY = 8;
+  const CAP = 25;
+  const CONCURRENCY = 10;
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1155,7 +1246,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 5000); }
+        try { await withTimeout(enrichOne(item), 7000); }
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
@@ -1372,6 +1463,73 @@ async function getProductReviews({ sku = null, query = null, page_size = 5 } = {
   }
 }
 
+// ==================== SMART PRODUCT SEARCH (v5.4.0) ====================
+// Primary product-discovery tool: resolves natural-language queries to category IDs
+// via the in-memory CATEGORY_INDEX, then fetches from those categories.
+// Falls back to keyword search_products if no category match is found.
+async function smartProductSearch({ query, sport = 'tennis', min_price = null, max_price = null, page_size = 10 } = {}) {
+  if (!query) return { products: [], message: 'No query provided.' };
+  const startMs = Date.now();
+  const resolved = resolveCategoriesFromQuery(query, 3);
+  console.log(`[smart-search] query="${query}" resolved ${resolved.length} categories in ${Date.now() - startMs}ms:`, resolved.map(c => `${c.id}:${c.name}`).join(', '));
+
+  let allProducts = [];
+  let sources = [];
+
+  // Strategy 1: Fetch from resolved categories (parallel)
+  if (resolved.length > 0) {
+    const catResults = await Promise.allSettled(
+      resolved.map(cat => getProductsByCategory(cat.id, page_size, { min_price, max_price, sport }))
+    );
+    for (let i = 0; i < catResults.length; i++) {
+      if (catResults[i].status === 'fulfilled') {
+        const r = catResults[i].value;
+        const prods = r.products || [];
+        if (prods.length > 0) {
+          sources.push({ category_id: resolved[i].id, category_name: resolved[i].name, count: prods.length });
+          allProducts.push(...prods);
+        }
+      }
+    }
+  }
+
+  // Strategy 2: Also run keyword search in parallel for coverage
+  let searchResults = [];
+  try {
+    const sr = await searchProducts(query, page_size, { min_price, max_price, sport });
+    searchResults = sr.products || [];
+    if (searchResults.length > 0) {
+      sources.push({ source: 'keyword_search', count: searchResults.length });
+    }
+  } catch (e) {
+    console.log(`[smart-search] keyword search failed:`, e.message);
+  }
+
+  // Merge: de-duplicate by SKU, prefer category results (richer)
+  const seen = new Set();
+  const merged = [];
+  for (const p of [...allProducts, ...searchResults]) {
+    if (p && p.sku && !seen.has(p.sku)) {
+      seen.add(p.sku);
+      merged.push(p);
+    }
+  }
+
+  // Sort by qty desc (in-stock first), then by price
+  merged.sort((a, b) => (b.qty || 0) - (a.qty || 0) || (a.price || 99999) - (b.price || 99999));
+  const final = merged.slice(0, Math.min(page_size, 20));
+
+  return {
+    products: final,
+    total: merged.length,
+    showing: final.length,
+    sources,
+    resolved_categories: resolved,
+    took_ms: Date.now() - startMs,
+    message: final.length === 0 ? `No in-stock products found for "${query}". Try broadening your search or ask for a specific category.` : null
+  };
+}
+
 // ==================== EXECUTE ====================
 async function executeFunction(name, args, sport = 'tennis') {
   switch (name) {
@@ -1405,6 +1563,7 @@ async function executeFunction(name, args, sport = 'tennis') {
     case 'find_categories': return { matches: findCategoriesByKeyword(args.keyword) };
     case 'list_categories': return { categories: listAllCategories(args || {}) };
     case 'get_product_reviews': return await getProductReviews(args || {});
+    case 'smart_product_search': return await smartProductSearch({ ...(args || {}), sport: args?.sport || sport });
     default: return { error: true, message: `Unknown function: ${name}` };
   }
 }
@@ -1817,6 +1976,7 @@ app.get('/api/health', async (req, res) => {
     version: pkg.version,
     last_refresh: lastCatalogRefresh,
     categories_loaded: CATEGORY_MAP.length,
+    category_index_keys: Object.keys(CATEGORY_INDEX).length,
     magento_bearer: magentoStatus,
     magento_oauth: oauthStatus,
     errors: Object.keys(errors).length ? errors : undefined,
