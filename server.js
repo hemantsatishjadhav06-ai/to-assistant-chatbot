@@ -1055,7 +1055,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     }
 
     const params = {
-      'searchCriteria[pageSize]': Math.min(Math.max(page_size * 3, 20), 40),  // v5.7.0: generous fetch for better filtering
+      'searchCriteria[pageSize]': Math.min(Math.max(page_size * 5, 30), 50),  // v6.0.4: larger fetch to get ALL shoes for LLM filtering
       'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
     };
     filters.forEach(f => {
@@ -1075,10 +1075,10 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     await enrichConfigurables(shaped, true);
 
     const inStock = shaped.filter(isProductAvailable);
-    let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
-    // Customer-requested filters: size, min_price, max_price.
+    let pool = inStock;
+    // v6.0.4: NOW PASSING size so applyPriceSizeFilters can actually filter by size
     const beforeCustomer = pool.length;
-    pool = applyPriceSizeFilters(pool, { min_price, max_price });
+    pool = applyPriceSizeFilters(pool, { min_price, max_price, size });
     const filtered_out = beforeCustomer - pool.length;
     let available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
     let message = null;
@@ -1232,8 +1232,8 @@ async function enrichConfigurables(products, forceAll = true) {
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
   // dropped enrichments mean dropped products ÃÂ¢ÃÂÃÂ so we must enrich more, faster.
-  const CAP = 5;        // v5.7.2: 5 products enriched, all parallel ÃÂ¢ÃÂÃÂ fits Render 30s
-  const CONCURRENCY = 5; // v5.7.2: all 5 in parallel = single round ÃÂ¢ÃÂÃÂ 3-5s
+  const CAP = 15;       // v6.0.4: 15 products enriched — get ALL shoes their children ÃÂ¢ÃÂÃÂ fits Render 30s
+  const CONCURRENCY = 8; // v6.0.4: 8 concurrent — 2 rounds max for 15 products ÃÂ¢ÃÂÃÂ 3-5s
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1282,7 +1282,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 5000); }  // v5.7.2: 5s per item ÃÂ¢ÃÂÃÂ balanced
+        try { await withTimeout(enrichOne(item), 8000); }  // v6.0.4: 8s per item — more time for children fetch ÃÂ¢ÃÂÃÂ balanced
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
