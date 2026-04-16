@@ -606,7 +606,7 @@ async function magentoGet(endpoint, params = {}) {
       'Accept': 'application/json'
     },
     params,
-    timeout: 15000   // v5.7.0: restored — no artificial time caps
+    timeout: 10000   // v5.7.2: balanced — generous but fits Render 30s
   });
   return response.data;
 }
@@ -1142,7 +1142,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     // v5.7.0: Fetch a large pool (up to 50) so we have enough after enrichment + price filter.
     // Configurable parents have price=0 in Magento — real prices come from enrichConfigurables.
     // We MUST over-fetch to ensure we find products in the requested price range.
-    const fetchSize = Math.min(Math.max(page_size * 4, 30), 50);
+    const fetchSize = Math.min(Math.max(page_size * 3, 20), 30);  // v5.7.2: fetch 20-30
     const params = {
       'searchCriteria[pageSize]': fetchSize,
       'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
@@ -1215,8 +1215,8 @@ async function enrichConfigurables(products, forceAll = true) {
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
   // dropped enrichments mean dropped products — so we must enrich more, faster.
-  const CAP = 10;       // v5.7.0: enrich up to 10 products — correctness over speed
-  const CONCURRENCY = 5; // v5.7.0: 5 parallel enrichments
+  const CAP = 5;        // v5.7.2: 5 products enriched, all parallel — fits Render 30s
+  const CONCURRENCY = 5; // v5.7.2: all 5 in parallel = single round ≈ 3-5s
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1265,7 +1265,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 8000); }  // v5.7.0: 8s per item — no artificial caps
+        try { await withTimeout(enrichOne(item), 5000); }  // v5.7.2: 5s per item — balanced
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
