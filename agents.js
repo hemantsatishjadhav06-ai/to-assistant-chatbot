@@ -39,7 +39,7 @@ async function callLLM({ model, messages, tools, tool_choice = 'auto', temperatu
         'HTTP-Referer': STORE_URL,
         'X-Title': 'TO Assistant (multi-agent)'
       },
-      timeout: 60000   // up from 45s to accommodate tool-call loops
+      timeout: 25000   // Render free tier has 30s gateway limit
     });
     return res.data;
   } catch (err) {
