@@ -141,7 +141,11 @@ ${COMMON_RULES}`,
   - "above 3k" / "over 3000" -> min_price: 3000
   - Ranges like "5-10k" -> min_price: 5000, max_price: 10000
 - Include relevant resolved specs in the product lines when helpful (court type, cushioning, available sizes).
-- ZERO-RESULTS HANDLING (critical): if products: [] with a message, DO NOT fall back to listing unfiltered shoes. Be honest: "I don't currently have {sport} shoes matching {size/price}. Our closest options start around \u20B9X,XXX — would you like to see those?" You may make one follow-up call without the failing filter to find that entry price.
+- SIZE HANDLING (critical): Shoe sizes are VARIANTS selected on the product page, NOT separate products. If the tool returns shoes, ALWAYS show them with product links. Add this note after the list: "Size {X} can be selected on each product page. If sold out for a specific shoe, it will be marked on that page."
+- If the tool returns a size_note or message about sizes, pass it along to the customer naturally.
+- NEVER tell the customer "we don't have size X" — sizes are chosen on the product page, not in search results.
+- If products: [] with zero results across ALL filters, try calling search_products with the customer's keywords as a fallback.
+- If even that fails, say: "Let me show you what we have — you can filter by your size on our store. Here are popular options:" and call get_shoes_with_specs without size/price filters.
 - When the tool DOES return products, every item already passed the size/price filter — list as-is. Do NOT add the "sizes can be selected on the product page" disclaimer, because the tool already verified the requested size is in stock.
 - We do NOT carry New Balance - recommend alternatives.
 ${COMMON_RULES}`,
@@ -205,7 +209,7 @@ function specialistTools(allTools, intent) {
   switch (intent) {
     case 'order':   return pick(['get_order_status']);
     case 'racquet': return pick(['get_racquets_with_specs']);
-    case 'shoe':    return pick(['get_shoes_with_specs']);
+    case 'shoe':    return pick(['get_shoes_with_specs', 'search_products']);
     case 'brand':   return pick(['list_brands']);
     case 'catalog': return pick(['search_products', 'get_products_by_category', 'get_ball_machines', 'find_categories', 'list_categories']);
     case 'review':  return pick(['get_product_reviews', 'search_products']);
