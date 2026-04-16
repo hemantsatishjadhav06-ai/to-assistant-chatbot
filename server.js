@@ -259,15 +259,16 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
     type: "function",
     function: {
       name: "get_racquets_with_specs",
-      description: "Return RACQUETS (not balls, not accessories) from the correct racquet category with brand resolved. ALWAYS use this for any query about racquets/rackets/paddles - NEVER use get_products_by_category for racquet queries. Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250. Supports brand, skill_level, and price filters.",
+      description: "Return RACQUETS (not balls, not accessories) from the correct racquet category with brand resolved. ALWAYS use this for any query about racquets/rackets/paddles - NEVER use get_products_by_category for racquet queries. Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250. Supports brand, skill_level, playing_style, and price filters. For 'best balance' / 'balanced' queries use playing_style='balance'.",
       parameters: {
         type: "object",
         properties: {
           sport: { type: "string", enum: ["tennis", "padel", "pickleball"], default: "tennis" },
           brand: { type: "string", description: "Brand name like Babolat, Head, Wilson, YONEX, Prince. Optional." },
           skill_level: { type: "string", enum: ["beginner", "intermediate", "advanced", "senior", "junior"], description: "Optional skill level filter." },
+          playing_style: { type: "string", enum: ["control", "power", "spin", "all-court", "balance", "comfort"], description: "Optional playing style. 'balance'=balanced control+power, 'power'=aggressive, 'control'=precise, 'spin'=topspin focused, 'comfort'=arm-friendly." },
           min_price: { type: "number", description: "Optional minimum price in INR." },
-          max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand before calling: '5K'->5000." },
+          max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand before calling: '5K'->5000, '20K'->20000, '1L'->100000." },
           page_size: { type: "integer", default: 10 }
         }
       }
@@ -605,7 +606,7 @@ async function magentoGet(endpoint, params = {}) {
       'Accept': 'application/json'
     },
     params,
-    timeout: 6000   // v5.6.1: 10s→6s — Render 30s budget is tight
+    timeout: 15000   // v5.7.0: restored — no artificial time caps
   });
   return response.data;
 }
@@ -1049,7 +1050,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     }
 
     const params = {
-      'searchCriteria[pageSize]': Math.min(page_size * 2, 40),
+      'searchCriteria[pageSize]': Math.min(Math.max(page_size * 3, 20), 40),  // v5.7.0: generous fetch for better filtering
       'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
     };
     filters.forEach(f => {
@@ -1064,8 +1065,8 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-    // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
-    await enrichConfigurables(shaped, true);  // ALWAYS forceAll for shoes — must verify child stock
+    // v5.7.0: Enrich all configurables — no time caps, correctness first
+    await enrichConfigurables(shaped, true);
 
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
@@ -1115,7 +1116,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
 // Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250
 const RACQUET_CATEGORIES = { tennis: 25, padel: 272, pickleball: 250 };
 
-async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_level = null, min_price = null, max_price = null, page_size = 10 } = {}) {
+async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_level = null, playing_style = null, min_price = null, max_price = null, page_size = 10 } = {}) {
   try {
     const catId = RACQUET_CATEGORIES[String(sport).toLowerCase()] || 25;
     const filters = [];
@@ -1123,9 +1124,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     filters.push({ group: idx++, field: 'category_id', value: catId });
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
-    // NOTE: removed quantity_and_stock_status — stock verified via fetchStockMap + enrichConfigurables.
     // v4.5.0: configurable-only restriction applies ONLY to tennis (grip-size variants).
-    // Pickleball paddles & padel rackets are simple SKUs — restricting breaks them.
     if (String(sport).toLowerCase() === 'tennis') {
       filters.push({ group: idx++, field: 'type_id', value: 'configurable' });
     }
@@ -1134,14 +1133,18 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
       const bid = brandNameToId(brand);
       if (bid) filters.push({ group: idx++, field: 'brands', value: bid });
     }
-    // Skill-level mapping to Magento categories (intersect via multiple category filters)
+    // Skill-level mapping
     const SKILL_CATS = { beginner: 87, intermediate: 80, advanced: 79, senior: 88, junior: 81 };
     if (skill_level && SKILL_CATS[String(skill_level).toLowerCase()]) {
       filters.push({ group: idx++, field: 'category_id', value: SKILL_CATS[String(skill_level).toLowerCase()] });
     }
 
+    // v5.7.0: Fetch a large pool (up to 50) so we have enough after enrichment + price filter.
+    // Configurable parents have price=0 in Magento — real prices come from enrichConfigurables.
+    // We MUST over-fetch to ensure we find products in the requested price range.
+    const fetchSize = Math.min(Math.max(page_size * 4, 30), 50);
     const params = {
-      'searchCriteria[pageSize]': Math.min(page_size * 2, 40),
+      'searchCriteria[pageSize]': fetchSize,
       'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
     };
     filters.forEach(f => {
@@ -1157,24 +1160,39 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-    await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+
+    // v5.7.0: Enrich ALL configurables — this is critical for correct pricing.
+    // Configurable parents store price=0; child enrichment reveals real prices.
+    await enrichConfigurables(shaped);
 
     const inStock = shaped.filter(isProductAvailable);
-    let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
+    let pool = inStock;
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
-    const available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
+
+    // v5.7.0: If price filter gives 0 results, FALL BACK to showing all in-stock racquets
+    // sorted by price proximity to the requested range. Never return empty when products exist.
+    let available;
     let message = null;
-    if (available.length === 0 && beforeCustomer > 0) {
+    if (pool.length === 0 && beforeCustomer > 0) {
+      // Sort by closeness to the midpoint of the requested price range
+      const mid = (min_price && max_price) ? (min_price + max_price) / 2
+                : max_price ? max_price * 0.8
+                : min_price ? min_price * 1.2
+                : 15000;
+      const sorted = inStock.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
+      available = stripInternals(sorted.slice(0, Math.min(page_size, 20)));
       const bits = [];
-      if (max_price) bits.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
-      if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
-      message = `No ${sport} racquets match the requested filters${bits.length ? ` (${bits.join(', ')})` : ''}.`;
+      if (min_price) bits.push(`above ₹${Number(min_price).toLocaleString('en-IN')}`);
+      if (max_price) bits.push(`under ₹${Number(max_price).toLocaleString('en-IN')}`);
+      message = `No exact matches in the ${bits.join(' and ')} range. Showing the closest available ${sport} racquets by price. The customer asked for ${bits.join(' and ')} — highlight any that are close and mention the actual prices clearly.`;
+    } else {
+      available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
     }
     return {
-      sport, filters_applied: { brand, skill_level, min_price, max_price },
+      sport, filters_applied: { brand, skill_level, playing_style, min_price, max_price },
       products: available, total: result.total_count, showing: available.length,
       filtered_out, message
     };
@@ -1197,8 +1215,8 @@ async function enrichConfigurables(products, forceAll = true) {
   if (targets.length === 0) return products;
   // v5.2.0: wider concurrency, faster fail. With strict isProductAvailable,
   // dropped enrichments mean dropped products — so we must enrich more, faster.
-  const CAP = 3;        // v5.6.1: slashed from 5→3 to fit Render 30s window
-  const CONCURRENCY = 3;
+  const CAP = 10;       // v5.7.0: enrich up to 10 products — correctness over speed
+  const CONCURRENCY = 5; // v5.7.0: 5 parallel enrichments
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1247,7 +1265,7 @@ async function enrichConfigurables(products, forceAll = true) {
     while (queue.length) {
       const item = queue.shift();
       if (item) {
-        try { await withTimeout(enrichOne(item), 2000); }  // v5.6.1: 3s→2s per item
+        try { await withTimeout(enrichOne(item), 8000); }  // v5.7.0: 8s per item — no artificial caps
         catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
       }
     }
@@ -1917,22 +1935,18 @@ app.post('/api/chat-agents', async (req, res) => {
       ? `${sessionHint || ''} [NORMALIZED SPEC — USE THESE VALUES VERBATIM] ${specBits.join(', ')}`
       : sessionHint;
 
-    // v5.6.1: 28s deadline — pipeline is faster now with no retry, so we can use more of Render's 30s window.
-    const DEADLINE_MS = 28000;
-    const deadline = new Promise((_, reject) => setTimeout(() => reject(new Error('deadline_exceeded')), DEADLINE_MS));
-    const result = await Promise.race([
-      masterHandle({
-        userMessages: fullMessages,
-        allTools: FUNCTION_DEFINITIONS,
-        executeFunction: sportBoundExecute,
-        slots: merged,
-        sessionHint: enrichedSessionHint,
-        followUpHint,
-        lastProducts,
-        normalizedSpec: normResult.spec || null
-      }),
-      deadline
-    ]);
+    // v5.7.0: NO deadline — let the pipeline complete naturally.
+    // Correctness > speed. The LLM + Magento will take as long as they need.
+    const result = await masterHandle({
+      userMessages: fullMessages,
+      allTools: FUNCTION_DEFINITIONS,
+      executeFunction: sportBoundExecute,
+      slots: merged,
+      sessionHint: enrichedSessionHint,
+      followUpHint,
+      lastProducts,
+      normalizedSpec: normResult.spec || null
+    });
 
     // Save assistant response to server history
     if (result.message) {
