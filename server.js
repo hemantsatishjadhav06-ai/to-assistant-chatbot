@@ -1795,10 +1795,31 @@ app.post('/api/chat-agents', async (req, res) => {
     const prior = sessionStore.get(sessionId).slots || {};
     const fresh = slotParser.parseSlots(lastUser);
     const merged = slotParser.mergeSlots(prior, fresh);
-    merged._rendered = slotParser.renderSlotsHint(merged);
 
-    // Persist merged slots for next turn.
+    // v5.5.0: Follow-up detection — inherit previous intent on refinement utterances.
+    const followUp = slotParser.detectFollowUp(lastUser);
+    let followUpHint = '';
+    const lastIntent = sessionStore.getLastIntent(sessionId);
+    if (followUp) {
+      followUpHint = followUp.hint || '';
+      // Inherit the previous intent so router can't drift
+      if (lastIntent && !merged.intent_hint) {
+        merged.intent_hint = lastIntent;
+        console.log(`[session:${sessionId}] follow-up "${followUp.type}" — inheriting intent=${lastIntent}`);
+      }
+      // Quantity override
+      if (followUp.page_size) {
+        merged._page_size = followUp.page_size;
+        followUpHint += ` Use page_size=${followUp.page_size}.`;
+      }
+      merged._follow_up = followUp.type;
+    }
+
+    merged._rendered = slotParser.renderSlotsHint(merged);
     sessionStore.update(sessionId, { slots: merged });
+
+    // Retrieve last products so follow-ups like "the second one" have a reference.
+    const lastProducts = sessionStore.getLastProducts(sessionId);
 
     // ===== v5.0.1: Smart order intent detection =====
     // If user says "order status" / "track" / "status" and session already has order_id,
@@ -1864,7 +1885,9 @@ app.post('/api/chat-agents', async (req, res) => {
       allTools: FUNCTION_DEFINITIONS,
       executeFunction: sportBoundExecute,
       slots: merged,
-      sessionHint
+      sessionHint,
+      followUpHint,
+      lastProducts
     });
 
     // Save assistant response to server history
@@ -1872,11 +1895,37 @@ app.post('/api/chat-agents', async (req, res) => {
       sessionStore.addMessage(sessionId, 'assistant', result.message);
     }
 
+    // v5.5.0: Capture products + intent so next-turn follow-ups have context.
+    try {
+      if (result.agent_trace?.router?.intent && result.agent_trace.router.intent !== 'other') {
+        sessionStore.setLastIntent(sessionId, result.agent_trace.router.intent);
+      }
+      const productLinks = [...(result.message || '').matchAll(/\*\*\[([^\]]+)\]\(([^)]+)\)\*\*/g)];
+      if (productLinks.length > 0) {
+        const products = productLinks.map(m => ({ name: m[1], product_url: m[2] }));
+        sessionStore.setLastProducts(sessionId, products);
+        console.log(`[session:${sessionId}] captured ${products.length} products + intent=${result.agent_trace?.router?.intent}`);
+      }
+    } catch (e) {
+      console.warn(`[session:${sessionId}] product capture failed:`, e.message);
+    }
+
     // Attach session id so clients can pin it across turns if they want.
     res.json({ ...result, session_id: sessionId, slots: merged });
   } catch (error) {
     console.error('Multi-agent error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+    // v5.5.0: Return 200 with a friendly message instead of 500 so the chat UI
+    // stays alive. Session history is untouched — next turn resumes cleanly.
+    const errSessionId = sessionStore.fallbackId(req);
+    const isTimeout = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || /timeout/i.test(error.message || '');
+    const friendlyMessage = isTimeout
+      ? "Sorry, that took longer than usual. Could you send your last message once more? Your conversation context is saved so I'll pick up right where we left off."
+      : "I hit a snag on that one — please try sending your message again. Everything we discussed is still in memory.";
+    res.status(200).json({
+      message: friendlyMessage,
+      agent_trace: { error: true, reason: error.code || error.message, recoverable: true },
+      session_id: errSessionId
+    });
   }
 });
 
