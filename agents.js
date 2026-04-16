@@ -1,5 +1,5 @@
-// agents.js — Multi-agent orchestration for TO Assistant (v6.0.0 rebuild)
-// Clean architecture: Router → Specialist → Single Tool Round → Response
+// agents.js â Multi-agent orchestration for TO Assistant (v6.0.0 rebuild)
+// Clean architecture: Router â Specialist â Single Tool Round â Response
 // 13 capabilities, no retries, no timing hacks.
 
 const axios = require('axios');
@@ -36,7 +36,7 @@ async function callLLM({ model, messages, tools, tool_choice = 'auto', temperatu
         'HTTP-Referer': STORE_URL,
         'X-Title': 'TO Assistant (multi-agent v6)'
       },
-      timeout: 60000  // v6.0: generous — local has no time limit
+      timeout: 60000  // v6.0: generous â local has no time limit
     });
     return res.data;
   } catch (err) {
@@ -97,18 +97,18 @@ async function routeIntent(userText, conversationHistory = []) {
 // ==================== SHARED COACHING PERSONA ====================
 const COACHING_PERSONA = `PERSONA: You speak with the authority and passion of a world-class tennis coach who has trained professionals on the ATP/WTA tour. You combine deep technical knowledge with a warm, approachable coaching style. Use confident language ("I'd put my player in this", "From my experience on court...") without being arrogant.
 
-Brand voice: warm, professional, deeply knowledgeable, coaching tone, short punchy sentences, sparing emojis (🎾 ✅).`;
+Brand voice: warm, professional, deeply knowledgeable, coaching tone, short punchy sentences, sparing emojis (ð¾ â).`;
 
-const PRODUCT_FORMAT = `CRITICAL PRODUCT FORMAT — you MUST use the product_url field from the tool response to create clickable links. Format EXACTLY like this:
+const PRODUCT_FORMAT = `CRITICAL PRODUCT FORMAT â you MUST use the product_url field from the tool response to create clickable links. Format EXACTLY like this:
 
 1. **[Product Name](PRODUCT_URL_FROM_TOOL)**
-   Price: ₹X,XXX
+   Price: â¹X,XXX
    Coach's Take: <one authoritative line about who this is for and why>
 
 Show 4-5 products minimum. Never show quantity/stock numbers.
 STRICT STOCK RULE: ONLY show products where in_stock is true.
 PRICE RULE: If price is null/0/missing, OMIT the Price line entirely.
-If price_max exists and > price, show "Price: ₹X,XXX - ₹Y,YYY".
+If price_max exists and > price, show "Price: â¹X,XXX - â¹Y,YYY".
 After listing products, add a "Coach's Verdict" paragraph with a comparative recommendation.`;
 
 const MEMORY_RULES = `CONVERSATION MEMORY (CRITICAL):
@@ -118,7 +118,7 @@ const MEMORY_RULES = `CONVERSATION MEMORY (CRITICAL):
 
 ANTI-HALLUCINATION RULE:
 - NEVER invent brands, categories, or products the customer didn't mention.
-- If customer says "more option" after SHOES, show MORE SHOES — not racquets.
+- If customer says "more option" after SHOES, show MORE SHOES â not racquets.
 - Before every tool call, sanity-check: "Did the customer mention this category/brand?"
 
 End with: "Is there anything else I can assist you with?"`;
@@ -136,19 +136,19 @@ const AGENT_PROMPTS = {
 - If order not found, suggest contacting +91 9502517700.
 ${COMMON_RULES}`,
 
-  racquet: `You are RacquetAgent — the racquet specialist with a world-class coach's eye. You ONLY recommend racquets/rackets/paddles.
+  racquet: `You are RacquetAgent â the racquet specialist with a world-class coach's eye. You ONLY recommend racquets/rackets/paddles.
 - Call get_racquets_with_specs with sport, brand, skill_level, playing_style, min_price, max_price from [ENFORCED FILTERS].
-- The tool handles price fallbacks internally — present whatever it returns.
+- The tool handles price fallbacks internally â present whatever it returns.
 - Reference technical aspects: head size, weight balance, string pattern, stiffness.
-- Grip size is selected on the product page — mention this if asked.
+- Grip size is selected on the product page â mention this if asked.
 ${COMMON_RULES}`,
 
-  shoe: `You are ShoeAgent — the footwear specialist with a world-class coach's perspective. You ONLY recommend shoes.
+  shoe: `You are ShoeAgent â the footwear specialist with a world-class coach's perspective. You ONLY recommend shoes.
 - Call get_shoes_with_specs with all filters from [ENFORCED FILTERS].
-- The tool handles size and price fallbacks internally — present whatever it returns.
+- The tool handles size and price fallbacks internally â present whatever it returns.
 - Reference: outsole durability, midsole cushioning, lateral support, court surface compatibility.
-- SIZE NOTE: Sizes are variants on the product page, not separate products.
-- We do NOT carry New Balance — recommend alternatives.
+- SIZE HANDLING: When the customer asks for a specific size, check specs.available_sizes in each product. Tell them which shoes have their size. If a shoe lacks their size, mention it. Sizes are selected as variants on the product page — include this tip.
+- We do NOT carry New Balance â recommend alternatives.
 ${COMMON_RULES}`,
 
   availability: `You are AvailabilityAgent for Pro Sports Outlets. The customer wants to check if a SPECIFIC product is in stock.
@@ -161,7 +161,7 @@ ${COMMON_RULES}`,
   comparison: `You are ComparisonAgent for Pro Sports Outlets. The customer wants to compare products side by side.
 - Call search_products once with keywords covering all products mentioned (e.g. "Babolat Pure Aero Wilson Clash").
 - Present a side-by-side comparison with these specs (where available): Price, Weight, Head Size, Balance, String Pattern, Stiffness.
-- End with a "Coach's Verdict" — who should buy what based on playing style.
+- End with a "Coach's Verdict" â who should buy what based on playing style.
 ${COMMON_RULES}`,
 
   starter_kit: `You are StarterKitAgent for Pro Sports Outlets. The customer is new and wants a complete equipment package.
@@ -169,7 +169,7 @@ ${COMMON_RULES}`,
 - Recommend: 1 racquet/paddle + 1 can of balls + 1 pair of shoes + 1 bag (if budget allows).
 - For each item, show name, price, link.
 - Add up the total cost. Stay within the customer's budget if mentioned.
-- Give beginner-friendly coaching advice: "Start with a lightweight racquet — it's forgiving while you develop your strokes."
+- Give beginner-friendly coaching advice: "Start with a lightweight racquet â it's forgiving while you develop your strokes."
 ${COMMON_RULES}`,
 
   brand: `You are BrandAgent for Pro Sports Outlets.
@@ -177,14 +177,14 @@ ${COMMON_RULES}`,
 - Keep it short. End with an offer to help pick a product.
 ${COMMON_RULES}`,
 
-  catalog: `You are CatalogAgent — handles balls, strings, bags, accessories, ball machines, clothing, sale items, used racquets.
+  catalog: `You are CatalogAgent â handles balls, strings, bags, accessories, ball machines, clothing, sale items, used racquets.
 - BALL MACHINES: call get_ball_machines (not search_products).
 - For everything else: call smart_product_search with the customer's keywords.
 - Use get_products_by_category only when you know the exact category ID.
 - Category IDs: Tennis Balls=31, Pickleball Balls=252, Padel Balls=273, Strings=29, Bags=115, Accessories=37, Used Racquets=90, Clothing=36, Wimbledon Sale=292, Grand Slam=349, Boxing Day=437.
 ${COMMON_RULES}`,
 
-  review: `You are ReviewAgent — the product expert who contextualizes customer feedback with a coach's insight.
+  review: `You are ReviewAgent â the product expert who contextualizes customer feedback with a coach's insight.
 - Call get_product_reviews with the product name/keywords.
 - Show: product link, average rating, up to 3 reviews.
 - If no reviews found, show the product link and suggest checking the product page.
@@ -192,7 +192,7 @@ ${COMMON_RULES}`,
 ${COMMON_RULES}`,
 
   coupon: `You are CouponAgent for Pro Sports Outlets. The customer is asking about discounts, offers, or coupon codes.
-- WELCOME10: 10% off up to ₹300 for first-time buyers. Always mention this.
+- WELCOME10: 10% off up to â¹300 for first-time buyers. Always mention this.
 - Active sale categories: Wimbledon Sale, Grand Slam Collection, Boxing Day Sale.
 - Call get_products_by_category with sale category IDs (292, 349, 437) to show current sale items if asked.
 - If the customer asks "what's on sale?", show items from the sale categories.
@@ -206,7 +206,7 @@ ${COMMON_RULES}`,
 - If the customer wants specific strings, call smart_product_search to show string options.
 ${COMMON_RULES}`,
 
-  tech: `You are TechAgent for Pro Sports Outlets — the equipment scientist and coaching expert.
+  tech: `You are TechAgent for Pro Sports Outlets â the equipment scientist and coaching expert.
 - Answer technical questions about equipment, technique, and sport fundamentals from your knowledge.
 - Topics: string patterns, swing weight, flex index, court surfaces, playing styles, grip sizing, racquet weight vs maneuverability, etc.
 - If the answer naturally leads to a product recommendation, mention it and offer to search.
@@ -223,7 +223,7 @@ Shipping: dispatched within 8 hrs, Blue Dart 2-5 business days.
 Payment: Cards, Net Banking, UPI, EMI (coming within a week), COD.
 Warranty: https://tennisoutlet.in/warranty-promise
 Buying Guide: https://tennisoutlet.in/buying-guide
-WELCOME10: 10% off up to ₹300 for first-time buyers.
+WELCOME10: 10% off up to â¹300 for first-time buyers.
 Used Racquets: https://tennisoutlet.in/racquets/used-racquets.html
 Selling/Trade-in: "Yes! We do purchase customer OLD Racquets through our Racquet Upgrade Program. Check details and submit yours here: https://tennisoutlet.in/racquet-upgrade-program"
 Stringing: https://tennisoutlet.in/stringing.html
@@ -232,7 +232,7 @@ Answer directly. No tool calls. Keep under 10 lines. End with "Is there anything
 
   greeting: `You are the TO Assistant greeter. Based on the sport, greet with the right store name. Offer categories briefly (racquets, shoes, balls, order tracking). Keep to 2-3 lines.`,
 
-  other: `You are the TO Assistant fallback handler. The request is out of scope. Politely redirect to our stores — TennisOutlet.in, PickleballOutlet.in, PadelOutlet.in. 2-3 lines.`
+  other: `You are the TO Assistant fallback handler. The request is out of scope. Politely redirect to our stores â TennisOutlet.in, PickleballOutlet.in, PadelOutlet.in. 2-3 lines.`
 };
 
 // ==================== TOOL BINDINGS PER AGENT ====================
@@ -273,7 +273,7 @@ async function runSpecialist({ intent, sport, userMessages, allTools, executeFun
   if (lastProducts && lastProducts.length > 0) {
     messages.push({
       role: 'system',
-      content: `[PREVIOUSLY SHOWN PRODUCTS]\n${lastProducts.map(p => `${p.index}. ${p.name} — ₹${p.price || '?'} — ${p.product_url}`).join('\n')}`
+      content: `[PREVIOUSLY SHOWN PRODUCTS]\n${lastProducts.map(p => `${p.index}. ${p.name} â â¹${p.price || '?'} â ${p.product_url}`).join('\n')}`
     });
   }
   if (sessionHint) {
@@ -284,7 +284,7 @@ async function runSpecialist({ intent, sport, userMessages, allTools, executeFun
   }
   messages.push(...userMessages);
 
-  // STEP 1: First LLM call — forced tool call (if tools available)
+  // STEP 1: First LLM call â forced tool call (if tools available)
   let data = await callLLM({
     model: OPENROUTER_MODEL, messages, tools,
     tool_choice: tools.length ? 'required' : 'none'
@@ -304,7 +304,7 @@ async function runSpecialist({ intent, sport, userMessages, allTools, executeFun
       const result = await executeFunction(tc.function.name, args);
       convo.push({ role: 'tool', tool_call_id: tc.id, content: JSON.stringify(result) });
     }
-    // STEP 3: Second LLM call — forced text response (tool_choice: 'none')
+    // STEP 3: Second LLM call â forced text response (tool_choice: 'none')
     data = await callLLM({ model: OPENROUTER_MODEL, messages: convo, tools, tool_choice: 'none' });
     msg = data.choices[0].message;
   }
@@ -327,7 +327,7 @@ function validateResponse(intent, content) {
     if (bad) return { ok: false, reason: `shoe_response_contains_non_shoe: "${bad}"` };
   }
   // Placeholder price leak
-  if (['shoe', 'racquet', 'catalog'].includes(intent) && /₹\s*[xX],?[xX]{3}/.test(content)) {
+  if (['shoe', 'racquet', 'catalog'].includes(intent) && /â¹\s*[xX],?[xX]{3}/.test(content)) {
     return { ok: false, reason: 'price_placeholder_leak' };
   }
   return { ok: true };
@@ -380,10 +380,10 @@ async function masterHandle({ userMessages, allTools, executeFunction, slots = n
     enforcedFilters, sessionHint, followUpHint, lastProducts
   });
 
-  // Validate (lightweight — only category mismatch + placeholder leak)
+  // Validate (lightweight â only category mismatch + placeholder leak)
   const validation = validateResponse(route.intent, specialist.content);
   if (!validation.ok) {
-    console.warn(`[validator] ${validation.reason} — accepting as-is`);
+    console.warn(`[validator] ${validation.reason} â accepting as-is`);
   }
 
   return {
