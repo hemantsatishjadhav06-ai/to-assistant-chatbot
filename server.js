@@ -690,13 +690,35 @@ function shapeProduct(item, qty, sport = 'tennis') {
   return shaped;
 }
 
-// STRICT availability check (v5.1.1):
-// After fetchStockMap fix, configurable parents now get accurate is_in_stock
-// from /stockItems/{sku} fallback. qty >= 1 is the ONLY rule.
-// No more fallbacks or trust-based exceptions.
+// STRICT availability check (v5.1.3):
+// qty >= 1 is the ONLY rule. No exceptions.
 function isProductAvailable(p) {
   if (!p) return false;
   return (p.qty || 0) >= 1;
+}
+
+// Post-enrichment fallback (v5.1.3):
+// After enrichConfigurables runs, some configurable products may not have had
+// their children loaded (timeout on Render free tier). For those products,
+// if Magento's own search filter (quantity_and_stock_status=1) already deemed
+// them in-stock AND the product's stock_item.is_in_stock is true, we trust
+// Magento's signal and set a minimum qty=1.
+// This ONLY applies when enrichment failed — if enrichment succeeded and found
+// all children OOS (qty=0), we respect that result.
+function applyFallbackStock(products) {
+  for (const p of products) {
+    if (!p) continue;
+    // If enrichment loaded children successfully, trust the result (even if qty=0)
+    if (p._children_loaded) continue;
+    // Only apply fallback to configurable products (simples get accurate MSI qty)
+    if (p.type_id !== 'configurable') continue;
+    // If Magento's stock_item says in_stock AND enrichment didn't run/timed out,
+    // set minimum qty=1 so the product appears in results
+    if (p.magento_in_stock === true && (p.qty || 0) < 1) {
+      p.qty = 1;
+      p._stock_source = 'magento_fallback';
+    }
+  }
 }
 
 async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
@@ -724,6 +746,7 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
+    applyFallbackStock(shaped);  // v5.1.3: trust Magento signal for timed-out configurables
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
@@ -810,6 +833,7 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
+    applyFallbackStock(shaped);  // v5.1.3: trust Magento signal for timed-out configurables
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
@@ -877,6 +901,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
     await enrichConfigurables(shaped, true);  // ALWAYS forceAll for shoes — must verify child stock
+    applyFallbackStock(shaped);  // v5.1.3: trust Magento signal for timed-out configurables
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     // Customer-requested filters: size, min_price, max_price.
@@ -969,6 +994,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
+    applyFallbackStock(shaped);  // v5.1.3: trust Magento signal for timed-out configurables
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
@@ -1739,6 +1765,7 @@ app.get('/api/stock-debug', async (req, res) => {
     const enrichStart = Date.now();
     await enrichConfigurables(shaped);
     const enrichMs = Date.now() - enrichStart;
+    applyFallbackStock(shaped);
     const debugProducts = shaped.map(p => ({
       name: p.name,
       sku: p.sku,
@@ -1748,6 +1775,7 @@ app.get('/api/stock-debug', async (req, res) => {
       _children_loaded: p._children_loaded || false,
       _children_count: p._children ? p._children.length : 0,
       _children_stock: p._children ? p._children.map(c => ({ sku: c.sku, qty: c.qty, in_stock: c.in_stock })) : [],
+      _stock_source: p._stock_source || (p._children_loaded ? 'children' : 'msi'),
       available: isProductAvailable(p)
     }));
     res.json({
