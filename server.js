@@ -695,26 +695,24 @@ function shapeProduct(item, qty, sport = 'tennis') {
   return shaped;
 }
 
-// Smart availability check:
-// - Configurable products (shoes, racquets): parent qty is ALWAYS 0 in Magento inventory API
-//   because stock lives on child variant SKUs. If Magento returned it with status=1 + visibility=4,
-//   it's available on the website. Trust Magento's own salability check.
-// - Simple products: use qty from inventory API directly.
-// - If enrichConfigurables successfully summed child stock and qty > 0, trust that too.
-// - If Magento's extension_attributes.stock_item.is_in_stock is explicitly false, product is unavailable.
+// STRICT availability check (v5.1.0):
+// Two-gate system: Magento's quantity_and_stock_status=1 filter is Gate 1 (search-time).
+// enrichConfigurables resolving child stock is Gate 2 (post-search).
+// A product must pass BOTH gates to be shown to the customer.
 function isProductAvailable(p) {
   if (!p) return false;
-  // If enrichConfigurables already resolved positive stock, it's available
+  // Gate 2a: enrichment confirmed positive stock → available
   if ((p.qty || 0) >= 1) return true;
-  // If Magento explicitly said is_in_stock = false, trust that
-  if (p.magento_in_stock === false) return false;
-  // Configurable products with qty=0: this is NORMAL — stock lives on children.
-  // Since we only search for status=1 + visibility=4, Magento already confirmed salability.
-  if (p.type_id === 'configurable') return true;
-  // Simple product with qty=0 and no explicit Magento signal: unavailable
-  if ((p.qty || 0) < 1 && p.magento_in_stock !== true) return false;
-  // Default: available if Magento returned it in an active search
-  return true;
+  // Gate 2b: for configurable products where enrichment FAILED (children not loaded),
+  // trust Magento's Gate 1 filter — it already confirmed salability.
+  // But if children WERE loaded and total qty is still 0, the product is genuinely OOS.
+  if (p.type_id === 'configurable') {
+    if (p._children_loaded) return false;  // enrichment worked, qty is truly 0 → OOS
+    // enrichment failed/timed out — Magento's stock filter already vetted this product
+    return true;
+  }
+  // Simple products: qty must be >= 1
+  return false;
 }
 
 async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
@@ -727,6 +725,9 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
       'searchCriteria[filter_groups][1][filters][0][value]': 1,
       'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
       'searchCriteria[filter_groups][2][filters][0][value]': 4,
+      // Magento-side stock filter: only return products Magento considers IN STOCK
+      'searchCriteria[filter_groups][3][filters][0][field]': 'quantity_and_stock_status',
+      'searchCriteria[filter_groups][3][filters][0][value]': 1,
       'searchCriteria[pageSize]': Math.min(fetchSize, 100),
       'searchCriteria[sortOrders][0][field]': 'created_at',
       'searchCriteria[sortOrders][0][direction]': 'DESC'
@@ -738,7 +739,7 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-    await enrichConfigurables(shaped);  // forceAll=false: only fetch children for price resolution
+    await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
@@ -777,6 +778,12 @@ function buildSearchParams(pattern, pageSize) {
     // AND status=1
     'searchCriteria[filter_groups][1][filters][0][field]': 'status',
     'searchCriteria[filter_groups][1][filters][0][value]': 1,
+    // AND visibility=4 (catalog+search)
+    'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
+    'searchCriteria[filter_groups][2][filters][0][value]': 4,
+    // AND quantity_and_stock_status=1 (Magento-side: only return products Magento considers IN STOCK)
+    'searchCriteria[filter_groups][3][filters][0][field]': 'quantity_and_stock_status',
+    'searchCriteria[filter_groups][3][filters][0][value]': 1,
     'searchCriteria[pageSize]': Math.min(pageSize, 100),
     'searchCriteria[sortOrders][0][field]': 'name',
     'searchCriteria[sortOrders][0][direction]': 'ASC'
@@ -818,7 +825,7 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-    await enrichConfigurables(shaped);  // forceAll=false: only fetch children for price resolution
+    await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
@@ -855,6 +862,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     filters.push({ group: idx++, field: 'category_id', value: catId });
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
+    filters.push({ group: idx++, field: 'quantity_and_stock_status', value: 1 });
 
     if (brand) {
       const bid = brandNameToId(brand);
@@ -884,7 +892,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
-    await enrichConfigurables(shaped, !!size);  // forceAll only when size filter active (need children for size matching)
+    await enrichConfigurables(shaped, true);  // ALWAYS forceAll for shoes — must verify child stock
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     // Customer-requested filters: size, min_price, max_price.
@@ -944,6 +952,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     filters.push({ group: idx++, field: 'category_id', value: catId });
     filters.push({ group: idx++, field: 'status', value: 1 });
     filters.push({ group: idx++, field: 'visibility', value: 4 });
+    filters.push({ group: idx++, field: 'quantity_and_stock_status', value: 1 });
     // v4.5.0: configurable-only restriction applies ONLY to tennis (grip-size variants).
     // Pickleball paddles & padel rackets are simple SKUs — restricting breaks them.
     if (String(sport).toLowerCase() === 'tennis') {
@@ -975,7 +984,7 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-    await enrichConfigurables(shaped);  // forceAll=false: only fetch children for price resolution
+    await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
     const beforeCustomer = pool.length;
@@ -1005,16 +1014,16 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
 // Magento stores price=0 and qty=0 on configurable parents; real values live on children.
 // After this runs, p.price / p.price_max / p.qty reflect the child aggregate, and
 // p._children holds per-child {sku, price, qty, size} for downstream size/price filtering.
-async function enrichConfigurables(products, forceAll = false) {
-  // forceAll=false by default — we now trust Magento's salability signal for configurables.
-  // Children are fetched only when price is missing (forceAll=false) or size filter is active (forceAll=true).
+async function enrichConfigurables(products, forceAll = true) {
+  // forceAll=true by default — we MUST verify child stock for every configurable product.
+  // Magento's quantity_and_stock_status filter is the first gate; enrichment is the second.
   const targets = forceAll
     ? products.filter(p => p != null)
     : products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
   if (targets.length === 0) return products;
   // v4.4.0: cap to first 20 and limit concurrency to 5 to avoid Render 30s request timeout
-  const CAP = 20;
-  const CONCURRENCY = 5;
+  const CAP = 15;
+  const CONCURRENCY = 4;
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
@@ -1037,6 +1046,7 @@ async function enrichConfigurables(products, forceAll = false) {
         const total = Object.values(stockMap).reduce((a, b) => a + (parseFloat(b) || 0), 0);
         if (total > 0) p.qty = total;
       } catch { /* keep parent qty */ }
+      p._children_loaded = true;  // Flag: children were successfully fetched
       // Per-child detail for size / price filtering
       p._children = children.map(c => {
         const attrs = {};
@@ -1055,10 +1065,15 @@ async function enrichConfigurables(products, forceAll = false) {
     }
   };
   // concurrency-limited pool
+  // Per-item timeout: 8s max per product to avoid Render 30s request timeout
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error('enrich-timeout')), ms))]);
   const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
     while (queue.length) {
       const item = queue.shift();
-      if (item) await enrichOne(item);
+      if (item) {
+        try { await withTimeout(enrichOne(item), 8000); }
+        catch (e) { console.log('[enrich] timeout/error for', item.sku, e.message); }
+      }
     }
   });
   await Promise.all(workers);
@@ -1092,10 +1107,10 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
 function stripInternals(products) {
   (products || []).forEach(p => {
     if (p && p._children) delete p._children;
-    // Add explicit in_stock flag using smart availability check
+    // Add explicit in_stock flag using strict availability check
     if (p) p.in_stock = isProductAvailable(p);
-    // Clean up internal fields the LLM doesn't need
-    if (p) { delete p.type_id; delete p.magento_in_stock; }
+    // Clean up ALL internal fields the LLM doesn't need
+    if (p) { delete p.type_id; delete p.magento_in_stock; delete p._children_loaded; }
   });
   return products;
 }
@@ -1124,6 +1139,9 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
       'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
       'searchCriteria[filter_groups][1][filters][0][field]': 'status',
       'searchCriteria[filter_groups][1][filters][0][value]': 1,
+      // Magento-side stock filter
+      'searchCriteria[filter_groups][2][filters][0][field]': 'quantity_and_stock_status',
+      'searchCriteria[filter_groups][2][filters][0][value]': 1,
       'searchCriteria[pageSize]': 20
     };
     const result = await magentoGet('/products', params);
