@@ -1751,17 +1751,70 @@ app.get('/api/health', async (req, res) => {
 app.get('/api/stock-debug', async (req, res) => {
   const keyword = req.query.q || 'tennis racquet';
   const sport = req.query.sport || 'tennis';
+  const sku = req.query.sku; // deep-dive a single configurable SKU
   try {
+    // If a specific SKU is requested, do a deep stock analysis
+    if (sku) {
+      const deepResult = {};
+      // 1. MSI source-items for this SKU
+      try {
+        const msiParams = {
+          'searchCriteria[filter_groups][0][filters][0][field]': 'sku',
+          'searchCriteria[filter_groups][0][filters][0][value]': sku,
+          'searchCriteria[filter_groups][0][filters][0][condition_type]': 'eq',
+          'searchCriteria[pageSize]': 10
+        };
+        let msiRes;
+        try { msiRes = await oauthGet('/inventory/source-items', msiParams); }
+        catch { msiRes = await magentoGet('/inventory/source-items', msiParams); }
+        deepResult.msi_parent = msiRes.items || [];
+      } catch (e) { deepResult.msi_parent_error = e.message; }
+      // 2. stockItems for this SKU
+      try {
+        const si = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`);
+        deepResult.stockItem_parent = { qty: si.qty, is_in_stock: si.is_in_stock, manage_stock: si.manage_stock };
+      } catch (e) { deepResult.stockItem_parent_error = e.message; }
+      // 3. Children
+      try {
+        const children = await magentoGet(`/configurable-products/${encodeURIComponent(sku)}/children`);
+        const childSkus = children.map(c => c.sku);
+        // MSI for children
+        const childMsi = await fetchStockMap(childSkus);
+        // Children stock_item from their own extension_attributes
+        deepResult.children = children.map(c => {
+          const si = c.extension_attributes?.stock_item;
+          return {
+            sku: c.sku,
+            name: c.name,
+            msi_qty: childMsi[c.sku] || 0,
+            stock_item_qty: si ? si.qty : null,
+            stock_item_in_stock: si ? si.is_in_stock : null
+          };
+        });
+      } catch (e) { deepResult.children_error = e.message; }
+      return res.json({ sku, deep: deepResult });
+    }
+    // Standard search debug
     const params = buildSearchParams(keyword, 8);
     const result = await magentoGet('/products', params);
     if (!result.items || result.items.length === 0) {
       return res.json({ keyword, total: 0, message: 'No Magento results' });
     }
     const items = result.items.slice(0, 8);
+    // Check if search results include extension_attributes.stock_item
+    const rawStockSample = items.slice(0, 2).map(i => ({
+      sku: i.sku,
+      type_id: i.type_id,
+      has_ext_attrs: !!i.extension_attributes,
+      has_stock_item: !!i.extension_attributes?.stock_item,
+      stock_item: i.extension_attributes?.stock_item ? {
+        qty: i.extension_attributes.stock_item.qty,
+        is_in_stock: i.extension_attributes.stock_item.is_in_stock
+      } : null
+    }));
     const skus = items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
     const shaped = items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
-    // Track enrichment timing
     const enrichStart = Date.now();
     await enrichConfigurables(shaped);
     const enrichMs = Date.now() - enrichStart;
@@ -1783,6 +1836,8 @@ app.get('/api/stock-debug', async (req, res) => {
       magento_total: result.total_count,
       checked: debugProducts.length,
       enrich_ms: enrichMs,
+      raw_stock_sample: rawStockSample,
+      msi_map_sample: Object.fromEntries(Object.entries(stockMap).slice(0, 5)),
       products: debugProducts
     });
   } catch (e) {
