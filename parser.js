@@ -242,4 +242,46 @@ function renderSlotsHint(slots) {
   return parts.join(', ');
 }
 
-module.exports = { parseSlots, mergeSlots, shouldReset, renderSlotsHint };
+// ==================== FOLLOW-UP DETECTION (v5.5.0) ====================
+// Recognizes short refinement utterances that must REUSE the last search
+// instead of being routed as fresh queries. Fixes the "more option" ->
+// hallucinated-Babolat-racquets bug.
+function detectFollowUp(text) {
+  const s = String(text || '').toLowerCase().trim();
+  if (!s || s.length > 80) return null;
+
+  // "more" family — same category, different results
+  if (/^(show (me )?)?(more|other|another|additional|next|few more)\s*(option|options|product|products|result|results|shoe|shoes|racquet|racquets|paddle|paddles|one|ones)?\.?\s*$/i.test(s)) {
+    return { type: 'more', hint: 'Customer wants MORE products of the SAME category/type as the previous response. Re-call the same tool with the same filters. Do NOT change category. Do NOT invent a brand the customer did not name.' };
+  }
+
+  // "cheaper/costlier/better" — price refinement on same category
+  if (/^(any )?(cheaper|costlier|pricier|budget|affordable|premium|better|higher end|lower end)\s*(one|ones|option|options)?\.?\s*$/i.test(s)) {
+    return { type: 'price_refine', hint: 'Customer wants the SAME category but at a different price tier. Keep category/brand/sport; adjust min_price or max_price accordingly.' };
+  }
+
+  // "the first/second/third one" — selection from last list
+  if (/^(the |that |this )?(first|second|third|fourth|fifth|last|1st|2nd|3rd|4th|5th|#?\s*\d)\s*(one|option|product|shoe|racquet)?\.?\s*$/i.test(s)) {
+    return { type: 'select', hint: 'Customer is referring to a product from the PREVIOUS list. Do NOT re-search. Look at the previous assistant turn and elaborate on the chosen product.' };
+  }
+
+  // Bare numeric quantity: "6 shoes", "show me 10", "10 racquets"
+  const qty = s.match(/^(?:show (?:me )?)?(\d{1,2})\s+(.{0,40})$/i);
+  if (qty) {
+    const n = parseInt(qty[1], 10);
+    const remainder = qty[2].trim();
+    if (n >= 1 && n <= 20) {
+      return { type: 'quantity', hint: `Customer wants ${n} products. Pass page_size=${n} to smart_product_search. Keep all previous filters.`, page_size: n, remainder };
+    }
+  }
+
+  // Bare single number (often a misinterpreted quantity)
+  if (/^\d{1,2}\s*$/.test(s)) {
+    const n = parseInt(s, 10);
+    if (n >= 1 && n <= 20) return { type: 'quantity', hint: `Customer probably wants ${n} of the previous items. Pass page_size=${n}.`, page_size: n };
+  }
+
+  return null;
+}
+
+module.exports = { parseSlots, mergeSlots, shouldReset, renderSlotsHint, detectFollowUp };
