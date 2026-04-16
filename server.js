@@ -2345,7 +2345,17 @@ app.get('/api/debug/trace', (req, res) => {
 
 app.get('/api/debug/classify', (req, res) => {
   const q = String(req.query.q || '');
-  res.json({ query: q, ...classifyIntent(q) });
+  const result = classifyIntent(q);
+  // v6.1.5: Show sport injection as it would happen in /api/chat
+  const qLow = q.toLowerCase();
+  if (result.top && result.top.force) {
+    if (!result.top.hintArgs) result.top.hintArgs = {};
+    if (!result.top.hintArgs.sport) {
+      if (/padel/i.test(q)) result.top.hintArgs.sport = 'padel';
+      else if (/pickleball|pickle/i.test(q)) result.top.hintArgs.sport = 'pickleball';
+    }
+  }
+  res.json({ query: q, ...result });
 });
 
 // ==================== PRODUCT PROBE (v4.7.1) ====================
@@ -2408,6 +2418,7 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'running',
     version: pkg.version,
+    code_build: '6.1.5c',
     last_refresh: lastCatalogRefresh,
     categories_loaded: CATEGORY_MAP.length,
     category_index_keys: Object.keys(CATEGORY_INDEX).length,
