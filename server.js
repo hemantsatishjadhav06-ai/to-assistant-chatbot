@@ -1454,6 +1454,48 @@ app.get('/api/debug/classify', (req, res) => {
   res.json({ query: q, ...classifyIntent(q) });
 });
 
+// ==================== PRODUCT PROBE (v4.7.1) ====================
+// Direct Magento lookup that skips status/visibility filters — for diagnosing
+// missing products. Returns raw API response.
+app.get('/api/debug/probe', async (req, res) => {
+  const q = String(req.query.q || 'tenniix');
+  try {
+    // Strategy 1: name LIKE without status filter
+    const r1 = await magentoGet('/products', {
+      'searchCriteria[filter_groups][0][filters][0][field]': 'name',
+      'searchCriteria[filter_groups][0][filters][0][value]': '%' + q + '%',
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
+      'searchCriteria[pageSize]': 10
+    });
+    // Strategy 2: url_key LIKE without status filter
+    const r2 = await magentoGet('/products', {
+      'searchCriteria[filter_groups][0][filters][0][field]': 'url_key',
+      'searchCriteria[filter_groups][0][filters][0][value]': '%' + q + '%',
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
+      'searchCriteria[pageSize]': 10
+    });
+    // Strategy 3: sku LIKE without status filter
+    const r3 = await magentoGet('/products', {
+      'searchCriteria[filter_groups][0][filters][0][field]': 'sku',
+      'searchCriteria[filter_groups][0][filters][0][value]': '%' + q + '%',
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
+      'searchCriteria[pageSize]': 10
+    });
+    const fmt = items => (items || []).map(i => ({
+      sku: i.sku, name: i.name, url_key: (i.custom_attributes||[]).find(a=>a.attribute_code==='url_key')?.value,
+      status: i.status, visibility: i.visibility, type_id: i.type_id, price: i.price
+    }));
+    res.json({
+      query: q,
+      by_name: { total: r1.total_count, items: fmt(r1.items) },
+      by_url_key: { total: r2.total_count, items: fmt(r2.items) },
+      by_sku: { total: r3.total_count, items: fmt(r3.items) }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ==================== HEALTH ====================
 app.get('/api/health', async (req, res) => {
   const pkg = require('./package.json');
