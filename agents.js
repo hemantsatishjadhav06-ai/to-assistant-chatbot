@@ -370,18 +370,12 @@ function validateResponse(intent, content, userText = '') {
   if (['shoe', 'racquet', 'catalog'].includes(intent) && /\u20B9\s*[xX],?[xX]{3}/.test(content)) {
     return { ok: false, reason: 'price_placeholder_leak' };
   }
-  // Price-cap violation: if user said "under N", no listed rupee amount may exceed N.
-  if (['shoe', 'racquet', 'catalog'].includes(intent)) {
-    const { min, max } = extractPriceBounds(userText);
-    if (max != null) {
-      const over = extractResponsePrices(content).find(p => p.lo > max);
-      if (over) return { ok: false, reason: `price_cap_violation_user_asked_under_${max}_response_has_${over.lo}` };
-    }
-    if (min != null) {
-      const under = extractResponsePrices(content).find(p => (p.hi || p.lo) < min);
-      if (under) return { ok: false, reason: `price_floor_violation_user_asked_over_${min}_response_has_${under.hi || under.lo}` };
-    }
-  }
+  // v5.7.0: REMOVED price-cap/floor validator.
+  // The server-side applyPriceSizeFilters already handles price filtering.
+  // When no exact matches exist, the server returns "closest available" products
+  // which are intentionally outside the requested range. The old validator
+  // was stripping these legitimate fallback results, causing empty responses.
+  // The LLM is trusted to present whatever the tool returns honestly.
   return { ok: true };
 }
 
@@ -411,35 +405,10 @@ async function masterHandle({ userMessages, allTools, executeFunction, slots = n
     enforcedFilters, sessionHint, followUpHint, lastProducts
   });
   let validation = validateResponse(route.intent, specialist.content, lastUser);
-  let retried = false;
-  // v5.6.1: NEVER retry the full specialist — it doubles the 15s pipeline and causes
-  // guaranteed timeouts on Render free tier. Instead, strip offending products inline.
+  // v5.7.0: simplified — no price stripping, no retry. Only category mismatch and
+  // placeholder leak are checked. If validation fails, accept as-is.
   if (!validation.ok) {
-    console.warn(`[validator] ${validation.reason} — stripping inline (no retry)`);
-    retried = true;
-    if (/price_(cap|floor)_violation/.test(validation.reason)) {
-      // Strip numbered product entries whose price violates the budget
-      const { min, max } = extractPriceBounds(lastUser);
-      specialist.content = specialist.content.replace(
-        /\d+\.\s*\*\*\[[^\]]+\]\([^)]+\)\*\*[^]*?(?=\d+\.\s*\*\*\[|\n\n\*\*Coach|$)/g,
-        (block) => {
-          const prices = [...block.matchAll(/₹\s*([\d,]+)/g)].map(m => parseFloat(m[1].replace(/,/g, '')));
-          const over = max != null && prices.some(p => p > max);
-          const under = min != null && prices.some(p => p < min);
-          if (over || under) {
-            console.log(`[validator] stripped product block with prices ${prices.join(',')} (budget ${min}-${max})`);
-            return '';
-          }
-          return block;
-        }
-      );
-      // Re-validate after stripping
-      validation = validateResponse(route.intent, specialist.content, lastUser);
-    }
-    if (!validation.ok) {
-      console.warn(`[validator] still failed after strip: ${validation.reason} — accepting as-is`);
-      // Accept anyway instead of showing error — some products are better than no answer
-    }
+    console.warn(`[validator] ${validation.reason} — accepting as-is (v5.7.0: no stripping)`);
   }
   return {
     message: specialist.content,
