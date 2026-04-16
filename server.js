@@ -1869,43 +1869,7 @@ app.post('/api/chat-agents', async (req, res) => {
       merged._follow_up = refinementType;
     }
 
-    // ===== v6.0.2: SMART CONTEXT CLEARING =====
-    // When this is NOT a follow-up, clear product-specific slots that were NOT
-    // mentioned in the current message. Prevents stale prices/brands from polluting
-    // new searches. The LLM gets these as [USE THESE VALUES VERBATIM] instructions.
-    if (!isFollowUpDetected) {
-      const normSpec = (normResult.ok && normResult.spec) ? normResult.spec : {};
-      // Price: clear if current message doesn't mention any price
-      if (fresh.min_price == null && fresh.max_price == null &&
-          normSpec.min_price == null && normSpec.max_price == null) {
-        if (merged.min_price != null || merged.max_price != null) {
-          console.log(`[context-clear:${sessionId}] wiping stale price ${merged.min_price}-${merged.max_price}`);
-          delete merged.min_price;
-          delete merged.max_price;
-        }
-      }
-      // Brand: clear if current message doesn't mention a brand
-      if (!fresh.brand && !normSpec.brand) {
-        if (merged.brand) {
-          console.log(`[context-clear:${sessionId}] wiping stale brand ${merged.brand}`);
-          delete merged.brand;
-        }
-      }
-      // Model, skill_level, playing_style, gender: clear if not in current message
-      if (!fresh.model && !normSpec.model) delete merged.model;
-      if (!fresh.skill_level && !normSpec.skill_level) delete merged.skill_level;
-      if (!fresh.gender && !normSpec.gender) delete merged.gender;
-      if (!normSpec.playing_style) delete merged.playing_style;
-      // Size: clear only on intent change (same-intent size carries over)
-      const priorCat = prior.intent_hint || prior.category;
-      const currentCat = merged.intent_hint || merged.category;
-      if (priorCat && currentCat && priorCat !== currentCat) {
-        if (fresh.size == null && !normSpec.size) delete merged.size;
-      }
-      // Sport persists across session
-    }
-
-    merged._rendered = slotParser.renderSlotsHint(merged);
+        merged._rendered = slotParser.renderSlotsHint(merged);
     sessionStore.update(sessionId, { slots: merged });
 
     // Retrieve last products so follow-ups like "the second one" have a reference.
@@ -1942,27 +1906,24 @@ app.post('/api/chat-agents', async (req, res) => {
       sessionStore.addMessage(sessionId, 'user', lastUser);
     }
 
-    // v6.0.2: Session hint — only show ACTIVE (post-clearing) slots, not stale prior slots.
+    // Humanized session hint for the LLM — includes slot context + brief conversation summary
     const turns = sessionStore.get(sessionId).turns || 0;
     let sessionHint = '';
     if (turns > 1) {
       const parts = [];
-      // Only show current active filters (already cleaned by context clearing above)
-      if (merged._rendered) {
-        parts.push('Active filters for this query: ' + merged._rendered);
+      // Slot context
+      if (prior && Object.keys(prior).some(k => prior[k] != null && k !== '_rendered')) {
+        parts.push(`Previous slots: ${slotParser.renderSlotsHint(prior) || '(none)'}. Current merged: ${merged._rendered || '(none)'}`);
       }
-      // Brief conversation summary from last 2 assistant responses
+      // Brief conversation summary from last 2 assistant responses (so LLM knows what it just recommended)
       const recentAssistant = serverHistory.filter(m => m.role === 'assistant').slice(-2);
       if (recentAssistant.length > 0) {
         const summaries = recentAssistant.map(m => {
+          // Truncate to first 300 chars to keep token usage reasonable
           const text = (m.content || '').slice(0, 300);
           return text.length >= 300 ? text + '...' : text;
         });
-        parts.push('Your recent responses to this customer: ' + summaries.join(' | '));
-      }
-      // v6.0.2: Anti-hallucination guard
-      if (!isFollowUpDetected) {
-        parts.push('IMPORTANT: This is a NEW query. Do NOT carry over price ranges, brands, or sizes from previous conversation turns unless they appear in the Active filters above.');
+        parts.push(`Your recent responses to this customer: ${summaries.join(' | ')}`);
       }
       sessionHint = parts.join('. ');
     }
