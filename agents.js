@@ -22,20 +22,37 @@ function getStoreName(sport) { return STORE_NAMES[String(sport || 'tennis').toLo
 // Keep backward compat
 const STORE_URL = STORE_URLS.tennis;
 
-async function callLLM({ model, messages, tools, tool_choice = 'auto', temperature = 0.7, max_tokens = 1600, response_format = null }) {
+async function callLLM({ model, messages, tools, tool_choice = 'auto', temperature = 0.7, max_tokens = 1600, response_format = null, _attempt = 1 }) {
   const body = { model, messages, temperature, max_tokens };
   if (tools && tools.length) { body.tools = tools; body.tool_choice = tool_choice; }
   if (response_format) body.response_format = response_format;
-  const res = await axios.post('https://openrouter.ai/api/v1/chat/completions', body, {
-    headers: {
-      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': STORE_URL,
-      'X-Title': 'TO Assistant (multi-agent)'
-    },
-    timeout: 45000
-  });
-  return res.data;
+  // v5.5.0: OpenRouter model fallback — if primary is slow or down, auto-route
+  // to an alternate. Prevents the "I'm having trouble connecting" errors.
+  body.models = [model, 'openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet'];
+  body.route = 'fallback';
+
+  try {
+    const res = await axios.post('https://openrouter.ai/api/v1/chat/completions', body, {
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': STORE_URL,
+        'X-Title': 'TO Assistant (multi-agent)'
+      },
+      timeout: 60000   // up from 45s to accommodate tool-call loops
+    });
+    return res.data;
+  } catch (err) {
+    const status = err.response?.status;
+    const code = err.code;
+    const retriable = code === 'ECONNABORTED' || code === 'ETIMEDOUT' || status === 429 || status === 502 || status === 503 || status === 504;
+    if (retriable && _attempt === 1) {
+      console.warn(`[callLLM] transient error (${code || status}), retrying once in 1.5s`);
+      await new Promise(r => setTimeout(r, 1500));
+      return callLLM({ model, messages, tools, tool_choice, temperature, max_tokens, response_format, _attempt: 2 });
+    }
+    throw err;
+  }
 }
 
 // ==================== AGENT 1: ROUTER ====================
@@ -59,13 +76,12 @@ async function routeIntent(userText, conversationHistory = []) {
     // Build router messages: system prompt + condensed recent history + current message
     const routerMessages = [{ role: 'system', content: ROUTER_PROMPT }];
 
-    // Include last 6 messages of conversation history so the router understands follow-ups
-    // (e.g. user asked about racquets, then says "under 5000" — router needs context)
+    // v5.5.0: Include last 6 messages plus explicit follow-up rule.
     const recentHistory = conversationHistory.slice(-6);
     if (recentHistory.length > 0) {
       routerMessages.push({
         role: 'system',
-        content: `[CONVERSATION CONTEXT] The customer's recent conversation (for follow-up understanding):\n${recentHistory.map(m => `${m.role}: ${(m.content || '').slice(0, 200)}`).join('\n')}\nUse this context to correctly classify the LATEST user message below. A short follow-up like "under 5000" after a racquet discussion should be classified as "product", not "greeting" or "other".`
+        content: `[CONVERSATION CONTEXT] Recent turns:\n${recentHistory.map(m => `${m.role}: ${(m.content || '').slice(0, 300)}`).join('\n')}\n\nFOLLOW-UP RULE (CRITICAL): If the current user message is a SHORT refinement such as "more", "more options", "cheaper", "other ones", "different", "another brand", "6 of them", "show more", "the second one", "5 shoes" — you MUST classify it as the SAME intent as the previous assistant turn. Do NOT switch product categories. Examples:\n- Previous assistant showed shoes + user says "more option" -> intent: "shoe" (NOT racquet, NOT catalog)\n- Previous assistant showed racquets + user says "cheaper" -> intent: "racquet"\n- Previous assistant showed balls + user says "another" -> intent: "catalog"\n- User says a bare number like "6 sports shoes" after a shoe conversation -> intent: "shoe"\nNEVER switch to a different product category unless the current message explicitly names that new category.`
       });
     }
     routerMessages.push({ role: 'user', content: userText });
@@ -101,12 +117,22 @@ STRICT STOCK RULE: ONLY show products where in_stock is true. If any product in 
 PRICE RULE: If a product’s price is null, 0, or missing, OMIT the "Price:" line entirely — never write "Unavailable", "N/A", "TBD", or any placeholder. If price_max is present and greater than price, render "Price: \u20B9X,XXX - \u20B9Y,YYY".
 After listing products, add a short “Coach’s Verdict” paragraph (2-3 sentences) with a comparative recommendation — e.g. who should pick what, beginner vs advanced, power vs control, clay vs hard court. Sound like you’re standing on court with the player, giving them straight advice.
 CONVERSATION MEMORY (CRITICAL — ALWAYS APPLY):
-- You have access to the FULL conversation history with this customer (all previous messages are included above your current message).
-- ALWAYS read and reference prior messages to understand follow-ups. If the customer says "the second one", "that one", "show me more", "cheaper options", "in size 10", etc., look at what you previously recommended.
-- If the customer asked about racquets and now says "under 5000", they mean racquets under 5000 — use the conversation context.
+- You have access to the FULL conversation history with this customer.
+- ALWAYS read prior turns to understand follow-ups. If the customer says "the second one", "that one", "show me more", "cheaper options", "in size 10", "6 of them", look at what you previously recommended.
+- If the customer asked about racquets and now says "under 5000", they mean racquets under 5000.
 - If the customer asked about an order and now asks "when will it arrive?", reference the order details from your previous response.
-- NEVER ask the customer to repeat information they already provided in this conversation.
-- Treat every message as part of an ongoing conversation, not as an isolated query.
+- NEVER ask the customer to repeat information they already provided.
+- Treat every message as part of an ongoing conversation.
+
+ANTI-HALLUCINATION RULE (v5.5.0, CRITICAL):
+- NEVER invent a brand, category, or product line that the customer did not explicitly mention in THIS conversation.
+- If the customer says "more option" after you showed SHOES, they want MORE SHOES — not racquets, not a different category.
+- If you previously showed ASICS shoes and the user says "more option", either show more ASICS or show different brands of shoes. DO NOT say "Babolat racquets" — that brand/category was not in the customer's query.
+- If you're unsure what the customer meant, ASK before tool-calling.
+- Before every tool call, sanity-check: "Did the customer or a previous assistant turn mention this specific category/brand?" If no, do not search for it.
+
+QUANTITY REQUESTS: If the customer asks for a specific number ("6 shoes", "show 10 racquets"), pass page_size to smart_product_search. Never show more than 10 in one response.
+
 SMART SEARCH: When you have smart_product_search available, prefer it for general product queries — it uses an in-memory category index to resolve natural-language queries to the best categories automatically, then combines category + keyword results. This gives wider, more accurate coverage than manually picking a category ID. For specialist tools (racquets, shoes, ball machines), use the dedicated tool first, then smart_product_search as fallback.
 End with: "Is there anything else I can assist you with?"`;
 
@@ -224,7 +250,7 @@ function specialistTools(allTools, intent) {
 }
 
 // ==================== RUN A SPECIALIST ====================
-async function runSpecialist({ intent, sport, userMessages, allTools, executeFunction, enforcedFilters = '', sessionHint = '' }) {
+async function runSpecialist({ intent, sport, userMessages, allTools, executeFunction, enforcedFilters = '', sessionHint = '', followUpHint = '', lastProducts = [] }) {
   const system = AGENT_PROMPTS[intent] || AGENT_PROMPTS.other;
   const tools = specialistTools(allTools, intent);
   const messages = [
@@ -234,13 +260,25 @@ async function runSpecialist({ intent, sport, userMessages, allTools, executeFun
   if (enforcedFilters) {
     messages.push({
       role: 'system',
-      content: `[ENFORCED FILTERS] The deterministic parser has extracted the following filters from the user's message. You MUST pass them verbatim to your tool call (do not re-parse, do not drop any): ${enforcedFilters}. If the tool returns zero products with these filters, DO NOT silently remove a filter — respond honestly and ask the user if they want to widen the search.`
+      content: `[ENFORCED FILTERS] The deterministic parser extracted these filters — you MUST pass them verbatim to your tool call (do not re-parse, do not drop any): ${enforcedFilters}. If the tool returns zero products, DO NOT silently drop a filter — respond honestly and ask if they want to widen the search.`
+    });
+  }
+  if (followUpHint) {
+    messages.push({
+      role: 'system',
+      content: `[FOLLOW-UP CONTEXT — HIGHEST PRIORITY] ${followUpHint} You MUST NOT invent a new brand/category. You MUST stay in the same product domain as the previous assistant turn.`
+    });
+  }
+  if (lastProducts && lastProducts.length > 0) {
+    messages.push({
+      role: 'system',
+      content: `[PREVIOUSLY SHOWN PRODUCTS] In the last assistant turn, you showed the customer:\n${lastProducts.map(p => `${p.index}. ${p.name} — ₹${p.price || '?'} — ${p.product_url}`).join('\n')}\nIf the customer now refers to "the second one", "that one", "#3" etc., this is the list to reference.`
     });
   }
   if (sessionHint) {
     messages.push({
       role: 'system',
-      content: `[SESSION CONTEXT] ${sessionHint}. If the current user message is a short follow-up (e.g. just a size, just a price cap, just a brand), combine it with the filters above to continue the previous search rather than starting over.`
+      content: `[SESSION CONTEXT] ${sessionHint}. If the current user message is a short follow-up, combine it with the filters above to continue — do not start over.`
     });
   }
   messages.push(...userMessages);
@@ -341,7 +379,7 @@ function validateResponse(intent, content, userText = '') {
 }
 
 // ==================== MASTER ORCHESTRATOR ====================
-async function masterHandle({ userMessages, allTools, executeFunction, slots = null, sessionHint = '' }) {
+async function masterHandle({ userMessages, allTools, executeFunction, slots = null, sessionHint = '', followUpHint = '', lastProducts = [] }) {
   const lastUser = [...userMessages].reverse().find(m => m.role === 'user')?.content || '';
   // If slots include an intent_hint from the deterministic parser, prefer it
   // over the LLM router (router is fine, but regex is free and always right
@@ -362,7 +400,7 @@ async function masterHandle({ userMessages, allTools, executeFunction, slots = n
   let specialist = await runSpecialist({
     intent: route.intent, sport: route.sport,
     userMessages, allTools, executeFunction,
-    enforcedFilters, sessionHint
+    enforcedFilters, sessionHint, followUpHint, lastProducts
   });
   let validation = validateResponse(route.intent, specialist.content, lastUser);
   let retried = false;
@@ -376,7 +414,7 @@ async function masterHandle({ userMessages, allTools, executeFunction, slots = n
     specialist = await runSpecialist({
       intent: route.intent, sport: route.sport,
       userMessages: stricter, allTools, executeFunction,
-      enforcedFilters, sessionHint
+      enforcedFilters, sessionHint, followUpHint, lastProducts
     });
     validation = validateResponse(route.intent, specialist.content, lastUser);
     if (!validation.ok) {
