@@ -619,7 +619,11 @@ async function fetchStockMap(skus) {
   const map = {};
   if (skus.length === 0) return map;
 
-  // STEP 1: MSI bulk query (works for simple products with source items)
+  // MSI bulk query — accurate for SIMPLE products (they have source-item records).
+  // Configurable parents have NO source-items (stock lives on children), so they
+  // stay at 0 in the map. enrichConfigurables is responsible for resolving their
+  // real stock by summing children. This is by design — we do NOT fall back to
+  // /stockItems because its is_in_stock flag can be stale (Magento index not rerun).
   try {
     const params = { 'searchCriteria[pageSize]': Math.min(skus.length * 3, 500) };
     skus.forEach((sku, i) => {
@@ -637,26 +641,7 @@ async function fetchStockMap(skus) {
       });
     }
   } catch (e) {
-    console.log('MSI bulk stock failed, falling back to individual:', e.response?.status);
-  }
-
-  // STEP 2: For SKUs MISSING from the MSI map (e.g. configurable parents — their stock
-  // lives on children, so source-items returns nothing), fall back to /stockItems/{sku}.
-  // This endpoint returns is_in_stock=true/false for the composite product salability.
-  const missing = skus.filter(sku => map[sku] === undefined || map[sku] === null);
-  if (missing.length > 0) {
-    console.log('[stock] MSI returned', Object.keys(map).length, '/', skus.length, '- checking', missing.length, 'missing via stockItems');
-    await Promise.all(missing.map(async sku => {
-      try {
-        let s;
-        try { s = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`); }
-        catch { s = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`); }
-        // For configurable products: is_in_stock=true means at least one child is salable.
-        // qty may be 0 (stock on children), so use is_in_stock as the truth signal.
-        // Set qty=1 minimum when is_in_stock=true so the product passes the qty>=1 filter.
-        map[sku] = s.is_in_stock ? Math.max(parseFloat(s.qty || 0), 1) : 0;
-      } catch { map[sku] = 0; }
-    }));
+    console.log('MSI bulk stock failed:', e.response?.status);
   }
 
   return map;
