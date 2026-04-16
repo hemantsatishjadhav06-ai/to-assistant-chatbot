@@ -1208,23 +1208,42 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       return { products: [], total: 0, message: `No ${sport} shoes found.` };
     }
 
-    // Get parent stock from stockItems API
+    // v6.1.3: SAME PIPELINE AS OTHER CATEGORIES — fetch, shape, enrich, filter
+    // But for shoes (all configurables), Magento MSI returns qty=0 for both parents
+    // AND children — so we TRUST visibility=4 + status=enabled as the stock signal.
+    // If Magento shows the product on the storefront, it's available for purchase.
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+    const shaped = result.items.map(item => {
+      const qty = stockMap[item.sku] || 0;
+      // For configurables with qty=0, trust Magento's is_in_stock or visibility=4
+      // Magento's own storefront uses this same signal to show products
+      const stockItem = item.extension_attributes?.stock_item;
+      const magentoSaysInStock = stockItem ? !!stockItem.is_in_stock : true; // default trust if no stock_item
+      const effectiveQty = (qty >= 1) ? qty : (magentoSaysInStock ? 1 : 0);
+      return shapeProduct(item, effectiveQty, sport);
+    });
 
-    // Enrich configurables to get child prices/stock (CAP=15)
+    // Enrich configurables to get child prices (CAP=15)
+    // Even if child stock is 0, we still get prices from children
     await enrichConfigurables(shaped, true);
 
-    // v6.1.0: RELAXED stock gate for shoes - trust parent if enrichment failed
-    // If enrichment succeeded (_children_loaded), use summed child qty.
-    // If enrichment FAILED (timeout/error), trust the parent fetchStockMap qty.
-    // This ensures we don't drop shoes just because enrichment timed out.
-    const inStock = shaped.filter(p => {
-      if (!p) return false;
-      // Both enriched and unenriched: just check qty >= 1
-      return (p.qty || 0) >= 1;
-    });
+    // v6.1.3: After enrichment, re-check: if enrichment found children with real stock, use that.
+    // If enrichment set qty=0 (children stock API returned 0), RESTORE the trust-based qty.
+    // Magento's stock API is unreliable for configurables on this instance.
+    for (const p of shaped) {
+      if (p && p.type_id === 'configurable' && (p.qty || 0) < 1) {
+        // Enrichment set qty to sum of children (which was 0). Restore trust-based availability.
+        const stockItem = p.magento_in_stock;
+        if (stockItem !== false) {
+          p.qty = 1; // Trust Magento — product is visible on storefront
+          p._stock_source = 'magento_visibility_trust';
+        }
+      }
+    }
+
+    // Filter: include all products with qty >= 1 (same as other categories)
+    const inStock = shaped.filter(p => p && (p.qty || 0) >= 1);
 
     // Apply price filters ONLY (no size filtering - LLM handles size)
     let pool = inStock;
@@ -1235,30 +1254,31 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     // Sort by qty descending, take up to 20
     let available = pool.sort((a, b) => (b.qty || 0) - (a.qty || 0)).slice(0, 20);
 
-    // v6.1.0: For size queries, include child sizes in the response so LLM can read sizes
-    // The last number in child SKU (e.g. "TSH0010-10" -> size 10)
+    // v6.1.0: For size queries, extract sizes from child SKUs for LLM
     if (size) {
       for (const p of available) {
         if (Array.isArray(p._children) && p._children.length > 0) {
-          // Build sizes_in_stock from child SKUs that have qty >= 1
-          const sizesInStock = p._children
-            .filter(c => (c.qty || 0) >= 1)
+          // Extract ALL sizes from child SKUs (not filtered by qty — stock is unreliable)
+          const allSizes = p._children
             .map(c => {
               const skuMatch = c.sku.match(/-([^-]+)$/);
               return skuMatch ? skuMatch[1] : null;
             })
             .filter(Boolean);
-          if (sizesInStock.length > 0) {
-            p.sizes_in_stock = [...new Set(sizesInStock)].sort((a, b) => parseFloat(a) - parseFloat(b));
+          if (allSizes.length > 0) {
+            p.sizes_available = [...new Set(allSizes)].sort((a, b) => parseFloat(a) - parseFloat(b));
           }
+        }
+        // Also extract from specs.available_sizes if present
+        if (p.specs && Array.isArray(p.specs.available_sizes) && p.specs.available_sizes.length > 0) {
+          p.sizes_available = p.specs.available_sizes;
         }
       }
     }
 
-    // Strip internals (relaxed - already filtered qty >= 1 above)
+    // Strip internals — same as stripInternals but without the qty < 1 kill
     available = available.filter(p => {
       if (!p) return false;
-      if ((p.qty || 0) < 1) return false;
       p.in_stock = true;
       delete p._children;
       delete p.type_id;
@@ -1276,7 +1296,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
                 : min_price ? parseFloat(min_price) * 1.2 : 5000;
       const sorted = inStock.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
       available = sorted.slice(0, 20).filter(p => {
-        if (!p || (p.qty || 0) < 1) return false;
+        if (!p) return false;
         p.in_stock = true;
         delete p._children; delete p.type_id; delete p.magento_in_stock;
         delete p._children_loaded; delete p._stock_source;
