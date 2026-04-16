@@ -1880,15 +1880,21 @@ app.post('/api/chat-agents', async (req, res) => {
     const detectedSport = merged.sport || 'tennis';
     const sportBoundExecute = (name, args) => executeFunction(name, args, detectedSport);
 
-    const result = await masterHandle({
-      userMessages: fullMessages,
-      allTools: FUNCTION_DEFINITIONS,
-      executeFunction: sportBoundExecute,
-      slots: merged,
-      sessionHint,
-      followUpHint,
-      lastProducts
-    });
+    // v5.5.0: 27s deadline so we respond before Render's 30s gateway kills us.
+    const DEADLINE_MS = 27000;
+    const deadline = new Promise((_, reject) => setTimeout(() => reject(new Error('deadline_exceeded')), DEADLINE_MS));
+    const result = await Promise.race([
+      masterHandle({
+        userMessages: fullMessages,
+        allTools: FUNCTION_DEFINITIONS,
+        executeFunction: sportBoundExecute,
+        slots: merged,
+        sessionHint,
+        followUpHint,
+        lastProducts
+      }),
+      deadline
+    ]);
 
     // Save assistant response to server history
     if (result.message) {
