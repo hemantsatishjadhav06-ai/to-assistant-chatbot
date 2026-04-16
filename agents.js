@@ -38,7 +38,7 @@ async function callLLM({ model, messages, tools, tool_choice = 'auto', temperatu
         'HTTP-Referer': STORE_URL,
         'X-Title': 'TO Assistant (multi-agent)'
       },
-      timeout: 60000   // v5.7.0: no artificial timeout — let OpenRouter take as long as needed
+      timeout: 25000   // v5.7.2: generous but fits within Render 30s total budget
     });
     return res.data;
   } catch (err) {
