@@ -78,6 +78,32 @@ function getStoreUrl(sport) {
   return getStoreConfig(sport).storeUrl;
 }
 
+// v6.1.1: Detect sport from product's category_ids — ensures correct store URL
+// Maps known category IDs to their sport. Products in padel/pickleball categories
+// get padeloutlet.in / pickleballoutlet.in URLs, NOT tennisoutlet.in.
+const CATEGORY_TO_SPORT = {
+  // Padel
+  245: 'padel', 272: 'padel', 273: 'padel', 274: 'padel',
+  // Pickleball
+  243: 'pickleball', 250: 'pickleball', 252: 'pickleball', 253: 'pickleball',
+  // Tennis (everything else defaults to tennis, but explicit mapping for key categories)
+  24: 'tennis', 25: 'tennis', 26: 'tennis', 29: 'tennis', 31: 'tennis',
+  34: 'tennis', 35: 'tennis', 37: 'tennis', 66: 'tennis', 115: 'tennis', 336: 'tennis'
+};
+
+function detectSportFromProduct(item, fallbackSport = 'tennis') {
+  const attrs = (item.custom_attributes || []).reduce((a, c) => { a[c.attribute_code] = c.value; return a; }, {});
+  const catIds = attrs.category_ids;
+  if (catIds) {
+    const ids = Array.isArray(catIds) ? catIds : String(catIds).split(',').map(s => s.trim());
+    for (const id of ids) {
+      const sport = CATEGORY_TO_SPORT[parseInt(id)];
+      if (sport) return sport;
+    }
+  }
+  return String(fallbackSport || 'tennis').toLowerCase();
+}
+
 // OAuth 1.0a credentials (used for orders endpoint which requires admin OAuth)
 const OAUTH_CONSUMER_KEY = process.env.MAGENTO_CONSUMER_KEY;
 const OAUTH_CONSUMER_SECRET = process.env.MAGENTO_CONSUMER_SECRET;
@@ -829,6 +855,9 @@ async function fetchStockMap(skus) {
 function shapeProduct(item, qty, sport = 'tennis') {
   const attrs = extractCustomAttrs(item);
   const brandLabel = attrs.brands ? resolveAttr('brands', attrs.brands) : (attrs.brand || null);
+  // v6.1.1: Detect correct sport from product's categories — ensures correct store URL
+  // A padel shoe (cat 274) gets padeloutlet.in, even if the query said sport='tennis'
+  const resolvedSport = detectSportFromProduct(item, sport);
   // Capture Magento's native stock signal from extension_attributes (when present)
   const magentoStockItem = item.extension_attributes?.stock_item;
   const shaped = {
@@ -839,8 +868,8 @@ function shapeProduct(item, qty, sport = 'tennis') {
     special_price: attrs.special_price ? parseFloat(attrs.special_price) : null,
     brand: brandLabel,
     short_description: attrs.short_description ? String(attrs.short_description).replace(/<[^>]*>/g, '').substring(0, 200) : null,
-    product_url: buildProductUrl(item, sport),
-    image: attrs.image ? `${getStoreUrl(sport)}/media/catalog/product${attrs.image}` : null,
+    product_url: buildProductUrl(item, resolvedSport),
+    image: attrs.image ? `${getStoreUrl(resolvedSport)}/media/catalog/product${attrs.image}` : null,
     qty,
     magento_in_stock: magentoStockItem ? !!magentoStockItem.is_in_stock : null
   };
