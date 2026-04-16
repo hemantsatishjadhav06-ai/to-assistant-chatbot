@@ -191,7 +191,21 @@ const CATEGORY_TO_SPORT = {
 };
 
 function detectSportFromProduct(item, fallbackSport = 'tennis') {
+  // v6.1.5: PRIORITY 1 — Detect sport from product NAME / SKU / url_key.
+  // This is the MOST reliable signal because Magento REST API does NOT return
+  // category_ids in custom_attributes, making category-based detection useless.
+  const nameLower = String(item.name || '').toLowerCase();
+  const skuLower = String(item.sku || '').toLowerCase();
   const attrs = (item.custom_attributes || []).reduce((a, c) => { a[c.attribute_code] = c.value; return a; }, {});
+  const urlKeyLower = String(attrs.url_key || '').toLowerCase();
+  const combined = `${nameLower} ${skuLower} ${urlKeyLower}`;
+
+  // Check for padel indicators (must check before tennis because "padel" is unambiguous)
+  if (combined.includes('padel')) return 'padel';
+  // Check for pickleball indicators
+  if (combined.includes('pickleball') || combined.includes('pickle ball')) return 'pickleball';
+
+  // PRIORITY 2 — Try category_ids if available (rarely works on this Magento instance)
   const catIds = attrs.category_ids;
   if (catIds) {
     const ids = Array.isArray(catIds) ? catIds : String(catIds).split(',').map(s => s.trim());
@@ -200,6 +214,8 @@ function detectSportFromProduct(item, fallbackSport = 'tennis') {
       if (sport) return sport;
     }
   }
+
+  // PRIORITY 3 — Fallback to the sport parameter passed by the caller
   return String(fallbackSport || 'tennis').toLowerCase();
 }
 
@@ -1284,10 +1300,25 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       }
     }
 
+    // v6.1.5: FINAL SAFETY NET — ensure every shoe has qty >= 1.
+    // Magento's stock API is broken for configurables on this instance; we trust
+    // visibility=4 + status=enabled as the stock signal.  No shoe should leave
+    // this function with qty=0.
+    for (const p of available) {
+      if (p && (p.qty || 0) < 1) {
+        p.qty = 1;
+        p._stock_source = 'shoe_safety_net';
+      }
+    }
+
     // Strip internals — same as stripInternals but without the qty < 1 kill
     available = available.filter(p => {
       if (!p) return false;
       p.in_stock = true;
+      // v6.1.5: Remove qty from LLM output for shoes — stock is unreliable,
+      // all shoes here are available (we verified visibility+status).
+      // Showing qty=1 to LLM would confuse it into saying "only 1 left".
+      delete p.qty;
       delete p._children;
       delete p.type_id;
       delete p.magento_in_stock;
@@ -1305,7 +1336,9 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       const sorted = inStock.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
       available = sorted.slice(0, 20).filter(p => {
         if (!p) return false;
+        if ((p.qty || 0) < 1) p.qty = 1; // safety net
         p.in_stock = true;
+        delete p.qty; // don't expose unreliable qty to LLM
         delete p._children; delete p.type_id; delete p.magento_in_stock;
         delete p._children_loaded; delete p._stock_source;
         return true;
