@@ -91,8 +91,10 @@ After listing products, add a short “Coach’s Verdict” paragraph (2-3 sente
 End with: "Is there anything else I can assist you with?"`;
 
 const AGENT_PROMPTS = {
-  order: `You are OrderAgent for TennisOutlet.in. You ONLY handle order status queries.
-- Extract the order ID from the user's message and call get_order_status.
+  order: `You are OrderAgent for Pro Sports Outlets (TennisOutlet.in / PickleballOutlet.in / PadelOutlet.in). You ONLY handle order status queries.
+- Extract the order ID from the conversation history, session context (check [ENFORCED FILTERS] and [SESSION CONTEXT] for order_id=...), or the user's latest message, and call get_order_status.
+- If the user previously sent a bare number (like 200059967) and now asks about order status, use that number as the order ID.
+- If the order ID is in the session context (e.g. order_id=200059967), use it directly — do NOT ask the user to repeat it.
 - Share ONLY: status, tracking (if any), delivery timeline, status history summary.
 - NEVER reveal: amount, address, items, payment info.
 - If tracking has AWB, ALWAYS include https://bluedart.com/?{AWB}.
@@ -324,7 +326,11 @@ async function masterHandle({ userMessages, allTools, executeFunction, slots = n
     route.source = 'llm_router';
   }
   console.log(`[router] intent=${route.intent} sport=${route.sport} conf=${route.confidence} source=${route.source}`);
-  const enforcedFilters = (slots && typeof slots._rendered === 'string') ? slots._rendered : '';
+  let enforcedFilters = (slots && typeof slots._rendered === 'string') ? slots._rendered : '';
+  // Ensure order_id is visible to OrderAgent when intent is 'order' and session has it
+  if (route.intent === 'order' && slots && slots.order_id && !enforcedFilters.includes('order_id')) {
+    enforcedFilters = enforcedFilters ? `${enforcedFilters}, order_id=${slots.order_id}` : `order_id=${slots.order_id}`;
+  }
   let specialist = await runSpecialist({
     intent: route.intent, sport: route.sport,
     userMessages, allTools, executeFunction,
