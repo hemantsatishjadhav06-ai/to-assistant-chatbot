@@ -1949,7 +1949,7 @@ app.post('/api/chat-agents', async (req, res) => {
     }
 
     // Attach session id so clients can pin it across turns if they want.
-    res.json({ ...result, session_id: sessionId, slots: merged });
+    res.json({ ...result, session_id: sessionId, slots: merged, _normalizer: { ok: normResult.ok, latency_ms: normResult.latency_ms, error: normResult.error || null, spec: normResult.spec || null } });
   } catch (error) {
     console.error('Multi-agent error:', error.response?.data || error.message);
     // v5.5.0: Return 200 with a friendly message instead of 500 so the chat UI
