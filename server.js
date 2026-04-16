@@ -1022,6 +1022,10 @@ function isProductAvailable(p) {
 
 async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
   try {
+    // v6.1.4: Detect correct sport from the CATEGORY ID itself — overrides LLM's sport param
+    // This ensures padel category 273 always gets padeloutlet.in URLs, etc.
+    const detectedSport = CATEGORY_TO_SPORT[parseInt(categoryId)] || sport || 'tennis';
+    sport = detectedSport;
     const fetchSize = Math.max(pageSize * 3, 30);
     const params = {
       'searchCriteria[filter_groups][0][filters][0][field]': 'category_id',
@@ -1104,6 +1108,10 @@ const SEARCH_STOPWORDS = new Set([
 
 async function searchProducts(query, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
   try {
+    // v6.1.4: Detect sport from query keywords if LLM didn't set it correctly
+    const qLower = String(query || '').toLowerCase();
+    if (qLower.includes('padel')) sport = 'padel';
+    else if (qLower.includes('pickleball') || qLower.includes('pickle')) sport = 'pickleball';
     const fetchSize = Math.max(pageSize * 3, 30);
     let result = await magentoGet('/products', buildSearchParams(query, fetchSize));
 
@@ -1713,6 +1721,10 @@ async function getProductReviews({ sku = null, query = null, page_size = 5 } = {
 // Falls back to keyword search_products if no category match is found.
 async function smartProductSearch({ query, sport = 'tennis', min_price = null, max_price = null, page_size = 10 } = {}) {
   if (!query) return { products: [], message: 'No query provided.' };
+  // v6.1.4: Detect sport from query keywords — overrides LLM default
+  const qLower = String(query || '').toLowerCase();
+  if (qLower.includes('padel')) sport = 'padel';
+  else if (qLower.includes('pickleball') || qLower.includes('pickle')) sport = 'pickleball';
   const startMs = Date.now();
   const resolved = resolveCategoriesFromQuery(query, 3);
   console.log(`[smart-search] query="${query}" resolved ${resolved.length} categories in ${Date.now() - startMs}ms:`, resolved.map(c => `${c.id}:${c.name}`).join(', '));
@@ -1721,6 +1733,7 @@ async function smartProductSearch({ query, sport = 'tennis', min_price = null, m
   let sources = [];
 
   // Strategy 1: Fetch from resolved categories (parallel)
+  // v6.1.4: Each category uses its OWN sport (from CATEGORY_TO_SPORT) — getProductsByCategory handles this
   if (resolved.length > 0) {
     const catResults = await Promise.allSettled(
       resolved.map(cat => getProductsByCategory(cat.id, page_size, { min_price, max_price, sport }))
