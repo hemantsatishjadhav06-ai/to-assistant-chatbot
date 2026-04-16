@@ -2001,6 +2001,18 @@ app.post('/api/chat', async (req, res) => {
 
     // Multi-agent pre-processor: classify intent BEFORE sending to LLM.
     const classification = classifyIntent(lastUser);
+
+    // v6.1.5: SPORT INJECTION — when intent is 'shoe' (or any tool that takes sport),
+    // detect sport from the user's message and inject it into hintArgs.
+    // This ensures "padel shoes" → sport='padel', "pickleball shoes" → sport='pickleball'.
+    if (classification.top && classification.top.force) {
+      if (!classification.top.hintArgs) classification.top.hintArgs = {};
+      if (!classification.top.hintArgs.sport) {
+        if (mentionsPadel) classification.top.hintArgs.sport = 'padel';
+        else if (mentionsPickle) classification.top.hintArgs.sport = 'pickleball';
+      }
+    }
+
     const agentHint = classification.top ? {
       role: 'system',
       content: `INTENT DETECTED: ${classification.top.intent} (score=${classification.top.score}). ` +
