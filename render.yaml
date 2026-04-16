@@ -13,6 +13,12 @@ services:
         value: https://console.tennisoutlet.in/rest/V1
       - key: MAGENTO_STORE_URL
         value: https://tennisoutlet.in
+      - key: TENNIS_STORE_URL
+        value: https://tennisoutlet.in
+      - key: PICKLEBALL_STORE_URL
+        value: https://pickleballoutlet.in
+      - key: PADEL_STORE_URL
+        value: https://padeloutlet.in
       - key: OPENROUTER_MODEL
         value: openai/gpt-4o
       - key: PORT
