@@ -1721,6 +1721,47 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
+// ==================== STOCK DIAGNOSTIC (temporary) ====================
+app.get('/api/stock-debug', async (req, res) => {
+  const keyword = req.query.q || 'tennis racquet';
+  const sport = req.query.sport || 'tennis';
+  try {
+    const params = buildSearchParams(keyword, 8);
+    const result = await magentoGet('/products', params);
+    if (!result.items || result.items.length === 0) {
+      return res.json({ keyword, total: 0, message: 'No Magento results' });
+    }
+    const items = result.items.slice(0, 8);
+    const skus = items.map(i => i.sku);
+    const stockMap = await fetchStockMap(skus);
+    const shaped = items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+    // Track enrichment timing
+    const enrichStart = Date.now();
+    await enrichConfigurables(shaped);
+    const enrichMs = Date.now() - enrichStart;
+    const debugProducts = shaped.map(p => ({
+      name: p.name,
+      sku: p.sku,
+      type_id: p.type_id,
+      qty: p.qty,
+      magento_in_stock: p.magento_in_stock,
+      _children_loaded: p._children_loaded || false,
+      _children_count: p._children ? p._children.length : 0,
+      _children_stock: p._children ? p._children.map(c => ({ sku: c.sku, qty: c.qty, in_stock: c.in_stock })) : [],
+      available: isProductAvailable(p)
+    }));
+    res.json({
+      keyword,
+      magento_total: result.total_count,
+      checked: debugProducts.length,
+      enrich_ms: enrichMs,
+      products: debugProducts
+    });
+  } catch (e) {
+    res.json({ error: e.message, stack: e.stack?.split('\n').slice(0, 5) });
+  }
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
