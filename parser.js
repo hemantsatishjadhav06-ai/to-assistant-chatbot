@@ -164,7 +164,9 @@ function extractIntentHint(text) {
   const s = text.toLowerCase().trim();
   if (/^(hi|hello|hey|hii|good (morning|afternoon|evening)|namaste)\s*\W*$/i.test(s)) return 'greeting';
   if (/\b(review|reviews|rating|ratings|customer feedback|star|stars)\b/i.test(s)) return 'review';
-  if (/\b(order|tracking|track|dispatch|shipment|delivery)\b/i.test(s) && extractOrderId(s)) return 'order';
+  // Order detection: keyword+ID together, OR bare 9-digit number (very likely an order ID in a shopping chatbot)
+  if (/\b(order|tracking|track|dispatch|shipment|delivery|status)\b/i.test(s) && extractOrderId(s)) return 'order';
+  if (/^\s*\d{7,12}\s*$/.test(s)) return 'order';  // bare numeric ID => assume order
   if (/\b(return|refund|shipping|warranty|policy|contact|store hours|phone|address|payment|emi|cod|coupon|welcome10)\b/i.test(s)) return 'policy';
   // "sell my old racquet", "trade-in my aero", "buyback", "exchange my racquet" -> policy (TO evaluates case-by-case)
   if (/\b(sell (my|the|an?|old|used) |trade[- ]?in|buy[- ]?back|exchange (my|the|an?|old|used)|give away my|part exchange)\b/i.test(s)) return 'policy';
@@ -234,6 +236,7 @@ function renderSlotsHint(slots) {
   if (slots.gender)      parts.push(`gender=${slots.gender}`);
   if (slots.court_type)  parts.push(`court_type=${slots.court_type}`);
   if (slots.sort)        parts.push(`sort=${slots.sort}`);
+  if (slots.order_id)    parts.push(`order_id=${slots.order_id}`);
   return parts.join(', ');
 }
 
