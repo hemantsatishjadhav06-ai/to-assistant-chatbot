@@ -22,12 +22,11 @@ function getStoreName(sport) { return STORE_NAMES[String(sport || 'tennis').toLo
 // Keep backward compat
 const STORE_URL = STORE_URLS.tennis;
 
-async function callLLM({ model, messages, tools, tool_choice = 'auto', temperature = 0.7, max_tokens = 1000, response_format = null, _attempt = 1 }) {
+async function callLLM({ model, messages, tools, tool_choice = 'auto', temperature = 0.7, max_tokens = 1600, response_format = null, _attempt = 1 }) {
   const body = { model, messages, temperature, max_tokens };
   if (tools && tools.length) { body.tools = tools; body.tool_choice = tool_choice; }
   if (response_format) body.response_format = response_format;
-  // v5.5.0: OpenRouter model fallback — if primary is slow or down, auto-route
-  // to an alternate. Prevents the "I'm having trouble connecting" errors.
+  // v5.5.0: OpenRouter model fallback
   body.models = [model, 'openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet'];
   body.route = 'fallback';
 
@@ -39,7 +38,7 @@ async function callLLM({ model, messages, tools, tool_choice = 'auto', temperatu
         'HTTP-Referer': STORE_URL,
         'X-Title': 'TO Assistant (multi-agent)'
       },
-      timeout: 18000   // v5.6.1: 25s→18s — must leave room for Magento + enrich in 30s budget
+      timeout: 60000   // v5.7.0: no artificial timeout — let OpenRouter take as long as needed
     });
     return res.data;
   } catch (err) {
@@ -47,8 +46,8 @@ async function callLLM({ model, messages, tools, tool_choice = 'auto', temperatu
     const code = err.code;
     const retriable = code === 'ECONNABORTED' || code === 'ETIMEDOUT' || status === 429 || status === 502 || status === 503 || status === 504;
     if (retriable && _attempt === 1) {
-      console.warn(`[callLLM] transient error (${code || status}), retrying once in 500ms`);
-      await new Promise(r => setTimeout(r, 500));  // v5.6.1: 1.5s→500ms
+      console.warn(`[callLLM] transient error (${code || status}), retrying once in 1.5s`);
+      await new Promise(r => setTimeout(r, 1500));
       return callLLM({ model, messages, tools, tool_choice, temperature, max_tokens, response_format, _attempt: 2 });
     }
     throw err;
