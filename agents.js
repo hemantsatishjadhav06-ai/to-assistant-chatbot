@@ -225,7 +225,7 @@ Warranty: https://tennisoutlet.in/warranty-promise
 Buying Guide: https://tennisoutlet.in/buying-guide
 WELCOME10: 10% off up to ₹300 for first-time buyers.
 Used Racquets: https://tennisoutlet.in/racquets/used-racquets.html
-Selling/Trade-in: "We do take in select pre-owned racquets. Share photos + model/year + condition with our team on +91 9502517700 (Mon-Sat 10:30-18:00)."
+Selling/Trade-in: "Yes! We do purchase customer OLD Racquets through our Racquet Upgrade Program. Check details and submit yours here: https://tennisoutlet.in/racquet-upgrade-program"
 Stringing: https://tennisoutlet.in/stringing.html
 
 Answer directly. No tool calls. Keep under 10 lines. End with "Is there anything else I can assist you with?"`,
