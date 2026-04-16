@@ -619,6 +619,7 @@ async function fetchStockMap(skus) {
   const map = {};
   if (skus.length === 0) return map;
 
+  // STEP 1: MSI bulk query (works for simple products with source items)
   try {
     const params = { 'searchCriteria[pageSize]': Math.min(skus.length * 3, 500) };
     skus.forEach((sku, i) => {
@@ -626,7 +627,6 @@ async function fetchStockMap(skus) {
       params[`searchCriteria[filter_groups][0][filters][${i}][value]`] = sku;
       params[`searchCriteria[filter_groups][0][filters][${i}][condition_type]`] = 'eq';
     });
-    // Try OAuth first (admin scope), fallback to bearer
     let res;
     try { res = await oauthGet('/inventory/source-items', params); }
     catch { res = await magentoGet('/inventory/source-items', params); }
@@ -635,20 +635,30 @@ async function fetchStockMap(skus) {
         const s = it.sku;
         map[s] = (map[s] || 0) + parseFloat(it.quantity || 0);
       });
-      return map;
     }
   } catch (e) {
-    console.log('MSI bulk stock failed, falling back:', e.response?.status);
+    console.log('MSI bulk stock failed, falling back to individual:', e.response?.status);
   }
 
-  await Promise.all(skus.map(async sku => {
-    try {
-      let s;
-      try { s = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`); }
-      catch { s = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`); }
-      map[sku] = s.is_in_stock ? parseFloat(s.qty || 0) : 0;
-    } catch { map[sku] = 0; }
-  }));
+  // STEP 2: For SKUs MISSING from the MSI map (e.g. configurable parents — their stock
+  // lives on children, so source-items returns nothing), fall back to /stockItems/{sku}.
+  // This endpoint returns is_in_stock=true/false for the composite product salability.
+  const missing = skus.filter(sku => map[sku] === undefined || map[sku] === null);
+  if (missing.length > 0) {
+    console.log('[stock] MSI returned', Object.keys(map).length, '/', skus.length, '- checking', missing.length, 'missing via stockItems');
+    await Promise.all(missing.map(async sku => {
+      try {
+        let s;
+        try { s = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`); }
+        catch { s = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`); }
+        // For configurable products: is_in_stock=true means at least one child is salable.
+        // qty may be 0 (stock on children), so use is_in_stock as the truth signal.
+        // Set qty=1 minimum when is_in_stock=true so the product passes the qty>=1 filter.
+        map[sku] = s.is_in_stock ? Math.max(parseFloat(s.qty || 0), 1) : 0;
+      } catch { map[sku] = 0; }
+    }));
+  }
+
   return map;
 }
 
@@ -695,24 +705,13 @@ function shapeProduct(item, qty, sport = 'tennis') {
   return shaped;
 }
 
-// STRICT availability check (v5.1.0):
-// Two-gate system: Magento's quantity_and_stock_status=1 filter is Gate 1 (search-time).
-// enrichConfigurables resolving child stock is Gate 2 (post-search).
-// A product must pass BOTH gates to be shown to the customer.
+// STRICT availability check (v5.1.1):
+// After fetchStockMap fix, configurable parents now get accurate is_in_stock
+// from /stockItems/{sku} fallback. qty >= 1 is the ONLY rule.
+// No more fallbacks or trust-based exceptions.
 function isProductAvailable(p) {
   if (!p) return false;
-  // Gate 2a: enrichment confirmed positive stock → available
-  if ((p.qty || 0) >= 1) return true;
-  // Gate 2b: for configurable products where enrichment FAILED (children not loaded),
-  // trust Magento's Gate 1 filter — it already confirmed salability.
-  // But if children WERE loaded and total qty is still 0, the product is genuinely OOS.
-  if (p.type_id === 'configurable') {
-    if (p._children_loaded) return false;  // enrichment worked, qty is truly 0 → OOS
-    // enrichment failed/timed out — Magento's stock filter already vetted this product
-    return true;
-  }
-  // Simple products: qty must be >= 1
-  return false;
+  return (p.qty || 0) >= 1;
 }
 
 async function getProductsByCategory(categoryId, pageSize = 10, { min_price = null, max_price = null, sport = 'tennis' } = {}) {
@@ -1107,8 +1106,8 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
 function stripInternals(products) {
   (products || []).forEach(p => {
     if (p && p._children) delete p._children;
-    // Add explicit in_stock flag using strict availability check
-    if (p) p.in_stock = isProductAvailable(p);
+    // Add explicit in_stock flag: only products with qty >= 1 are available
+    if (p) p.in_stock = (p.qty || 0) >= 1;
     // Clean up ALL internal fields the LLM doesn't need
     if (p) { delete p.type_id; delete p.magento_in_stock; delete p._children_loaded; }
   });
