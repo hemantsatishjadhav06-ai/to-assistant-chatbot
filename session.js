@@ -130,4 +130,42 @@ function fallbackId(req) {
   return `ip:${ip}`;
 }
 
-module.exports = { get, update, reset, stats, fallbackId, getOrCreate, addMessage, getHistory, setHistory };
+/**
+ * Store compact product summaries from the most recent tool response.
+ * Lets follow-ups like "the second one" reference actual products.
+ */
+function setLastProducts(id, products) {
+  const s = getOrCreate(id);
+  if (!s) return;
+  s.lastProducts = (products || []).slice(0, 10).map((p, i) => ({
+    index: i + 1,
+    name: p.name || null,
+    sku: p.sku || null,
+    price: p.price || null,
+    product_url: p.product_url || p.url || null
+  }));
+  s.updatedAt = now();
+}
+
+function getLastProducts(id) {
+  const s = store.get(id);
+  return s?.lastProducts || [];
+}
+
+/**
+ * Track which specialist/intent was last invoked successfully, so follow-ups
+ * can inherit it even when the LLM router gets confused.
+ */
+function setLastIntent(id, intent) {
+  const s = getOrCreate(id);
+  if (!s) return;
+  s.lastIntent = intent;
+  s.updatedAt = now();
+}
+
+function getLastIntent(id) {
+  const s = store.get(id);
+  return s?.lastIntent || null;
+}
+
+module.exports = { get, update, reset, stats, fallbackId, getOrCreate, addMessage, getHistory, setHistory, setLastProducts, getLastProducts, setLastIntent, getLastIntent };
