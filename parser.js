@@ -284,4 +284,48 @@ function detectFollowUp(text) {
   return null;
 }
 
-module.exports = { parseSlots, mergeSlots, shouldReset, renderSlotsHint, detectFollowUp };
+// ==================== NORMALIZER SPEC -> SLOT MAPPER (v5.6.0) ====================
+// Takes a QuerySpec from the LLM normalizer and converts it to the slot shape
+// the rest of the pipeline expects. Fills gaps the regex parser missed.
+function slotsFromSpec(spec, existingSlots = {}) {
+  if (!spec || typeof spec !== 'object') return existingSlots;
+  const out = { ...existingSlots };
+
+  // Intent hint: prefer spec's intent (more flexible categories)
+  if (spec.intent && !out.intent_hint) {
+    const intentMap = {
+      racquet: 'racquet', shoe: 'shoe', ball: 'catalog', string: 'catalog',
+      bag: 'catalog', overgrip: 'catalog', accessory: 'catalog',
+      ball_machine: 'catalog', order: 'order', policy: 'policy',
+      brand: 'brand', review: 'review', greeting: 'greeting', other: 'other'
+    };
+    out.intent_hint = intentMap[spec.intent] || out.intent_hint;
+  }
+
+  // Straightforward field copies — spec wins when parser is null
+  if (spec.sport && !out.sport) out.sport = spec.sport;
+  if (spec.brand && !out.brand) out.brand = spec.brand;
+  if (spec.model && !out.model) out.model = spec.model;
+  if (spec.skill_level && !out.skill_level) out.skill_level = spec.skill_level;
+  if (spec.playing_style && !out.playing_style) out.playing_style = spec.playing_style;
+  if (spec.size && !out.size) out.size = spec.size;
+  if (spec.gender && !out.gender) out.gender = spec.gender;
+  if (spec.min_price != null && out.min_price == null) out.min_price = spec.min_price;
+  if (spec.max_price != null && out.max_price == null) out.max_price = spec.max_price;
+  if (spec.quantity != null && out.quantity == null) out.quantity = spec.quantity;
+  if (spec.order_id && !out.order_id) out.order_id = spec.order_id;
+
+  // Follow-up metadata
+  if (spec.is_follow_up) {
+    out._is_follow_up = true;
+    out._refinement_type = spec.refinement_type;
+  }
+
+  // The canonical normalized query for downstream tool calls
+  if (spec.normalized_query) out.normalized_query = spec.normalized_query;
+  if (typeof spec.confidence === 'number') out._normalizer_confidence = spec.confidence;
+
+  return out;
+}
+
+module.exports = { parseSlots, mergeSlots, shouldReset, renderSlotsHint, detectFollowUp, slotsFromSpec };
