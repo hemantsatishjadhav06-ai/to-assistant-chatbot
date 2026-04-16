@@ -460,7 +460,13 @@
     // State
     let conversationHistory = [];
     let isLoading = false;
-    let sessionId = sessionStorage.getItem('to_session_id') || null;
+    // v5.5.0: Use localStorage so the session survives browser close AND
+    // generate a stable client ID upfront — prevents IP-based cross-user bleed.
+    let sessionId = localStorage.getItem('to_session_id') || null;
+    if (!sessionId) {
+      sessionId = 'c_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+      localStorage.setItem('to_session_id', sessionId);
+    }
 
     const chatContainer = document.getElementById('chatContainer');
     const messageInput = document.getElementById('messageInput');
@@ -609,7 +615,7 @@
           // Save session ID from server for memory persistence
           if (data.session_id) {
             sessionId = data.session_id;
-            sessionStorage.setItem('to_session_id', sessionId);
+            localStorage.setItem('to_session_id', sessionId);
           }
           const botMessage = data.message || "I'm sorry, I couldn't process that. Could you please rephrase?";
           addMessage(botMessage, false);
