@@ -54,14 +54,25 @@ Intents:
 
 Default sport = "tennis" unless pickleball/padel is clearly mentioned.`;
 
-async function routeIntent(userText) {
+async function routeIntent(userText, conversationHistory = []) {
   try {
+    // Build router messages: system prompt + condensed recent history + current message
+    const routerMessages = [{ role: 'system', content: ROUTER_PROMPT }];
+
+    // Include last 6 messages of conversation history so the router understands follow-ups
+    // (e.g. user asked about racquets, then says "under 5000" — router needs context)
+    const recentHistory = conversationHistory.slice(-6);
+    if (recentHistory.length > 0) {
+      routerMessages.push({
+        role: 'system',
+        content: `[CONVERSATION CONTEXT] The customer's recent conversation (for follow-up understanding):\n${recentHistory.map(m => `${m.role}: ${(m.content || '').slice(0, 200)}`).join('\n')}\nUse this context to correctly classify the LATEST user message below. A short follow-up like "under 5000" after a racquet discussion should be classified as "product", not "greeting" or "other".`
+      });
+    }
+    routerMessages.push({ role: 'user', content: userText });
+
     const data = await callLLM({
       model: OPENROUTER_ROUTER_MODEL,
-      messages: [
-        { role: 'system', content: ROUTER_PROMPT },
-        { role: 'user', content: userText }
-      ],
+      messages: routerMessages,
       temperature: 0,
       max_tokens: 80,
       response_format: { type: 'json_object' }
@@ -88,6 +99,13 @@ Replace PRODUCT_URL_FROM_TOOL with the actual product_url value returned by the 
 Show 4-5 products minimum when catalog has them. Never show quantity/stock numbers. Never use markdown images. ALWAYS include the product_url as a clickable markdown link — this is mandatory, not optional. The product_url already points to the correct sport-specific store (tennisoutlet.in, pickleballoutlet.in, or padeloutlet.in).
 PRICE RULE: If a product’s price is null, 0, or missing, OMIT the "Price:" line entirely — never write "Unavailable", "N/A", "TBD", or any placeholder. If price_max is present and greater than price, render "Price: \u20B9X,XXX - \u20B9Y,YYY".
 After listing products, add a short “Coach’s Verdict” paragraph (2-3 sentences) with a comparative recommendation — e.g. who should pick what, beginner vs advanced, power vs control, clay vs hard court. Sound like you’re standing on court with the player, giving them straight advice.
+CONVERSATION MEMORY (CRITICAL — ALWAYS APPLY):
+- You have access to the FULL conversation history with this customer (all previous messages are included above your current message).
+- ALWAYS read and reference prior messages to understand follow-ups. If the customer says "the second one", "that one", "show me more", "cheaper options", "in size 10", etc., look at what you previously recommended.
+- If the customer asked about racquets and now says "under 5000", they mean racquets under 5000 — use the conversation context.
+- If the customer asked about an order and now asks "when will it arrive?", reference the order details from your previous response.
+- NEVER ask the customer to repeat information they already provided in this conversation.
+- Treat every message as part of an ongoing conversation, not as an isolated query.
 End with: "Is there anything else I can assist you with?"`;
 
 const AGENT_PROMPTS = {
@@ -322,7 +340,7 @@ async function masterHandle({ userMessages, allTools, executeFunction, slots = n
   if (slots && slots.intent_hint) {
     route = { intent: slots.intent_hint, sport: slots.sport || 'tennis', confidence: 0.99, source: 'deterministic' };
   } else {
-    route = await routeIntent(lastUser);
+    route = await routeIntent(lastUser, userMessages.filter(m => m.role === 'user' || m.role === 'assistant'));
     route.source = 'llm_router';
   }
   console.log(`[router] intent=${route.intent} sport=${route.sport} conf=${route.confidence} source=${route.source}`);
