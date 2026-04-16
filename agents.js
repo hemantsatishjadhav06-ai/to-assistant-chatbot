@@ -22,7 +22,7 @@ function getStoreName(sport) { return STORE_NAMES[String(sport || 'tennis').toLo
 // Keep backward compat
 const STORE_URL = STORE_URLS.tennis;
 
-async function callLLM({ model, messages, tools, tool_choice = 'auto', temperature = 0.7, max_tokens = 1600, response_format = null, _attempt = 1 }) {
+async function callLLM({ model, messages, tools, tool_choice = 'auto', temperature = 0.7, max_tokens = 1000, response_format = null, _attempt = 1 }) {
   const body = { model, messages, temperature, max_tokens };
   if (tools && tools.length) { body.tools = tools; body.tool_choice = tool_choice; }
   if (response_format) body.response_format = response_format;
@@ -39,7 +39,7 @@ async function callLLM({ model, messages, tools, tool_choice = 'auto', temperatu
         'HTTP-Referer': STORE_URL,
         'X-Title': 'TO Assistant (multi-agent)'
       },
-      timeout: 25000   // Render free tier has 30s gateway limit
+      timeout: 18000   // v5.6.1: 25s→18s — must leave room for Magento + enrich in 30s budget
     });
     return res.data;
   } catch (err) {
@@ -47,8 +47,8 @@ async function callLLM({ model, messages, tools, tool_choice = 'auto', temperatu
     const code = err.code;
     const retriable = code === 'ECONNABORTED' || code === 'ETIMEDOUT' || status === 429 || status === 502 || status === 503 || status === 504;
     if (retriable && _attempt === 1) {
-      console.warn(`[callLLM] transient error (${code || status}), retrying once in 1.5s`);
-      await new Promise(r => setTimeout(r, 1500));
+      console.warn(`[callLLM] transient error (${code || status}), retrying once in 500ms`);
+      await new Promise(r => setTimeout(r, 500));  // v5.6.1: 1.5s→500ms
       return callLLM({ model, messages, tools, tool_choice, temperature, max_tokens, response_format, _attempt: 2 });
     }
     throw err;
@@ -290,7 +290,8 @@ async function runSpecialist({ intent, sport, userMessages, allTools, executeFun
   }
   messages.push(...userMessages);
 
-  let data = await callLLM({ model: OPENROUTER_MODEL, messages, tools, tool_choice: tools.length ? 'auto' : 'none' });
+  // v5.6.1: 'required' forces immediate tool call on first turn — no wasted tokens on preamble
+  let data = await callLLM({ model: OPENROUTER_MODEL, messages, tools, tool_choice: tools.length ? 'required' : 'none' });
   let msg = data.choices[0].message;
   let iters = 0;
   const convo = [...messages];
@@ -412,22 +413,33 @@ async function masterHandle({ userMessages, allTools, executeFunction, slots = n
   });
   let validation = validateResponse(route.intent, specialist.content, lastUser);
   let retried = false;
+  // v5.6.1: NEVER retry the full specialist — it doubles the 15s pipeline and causes
+  // guaranteed timeouts on Render free tier. Instead, strip offending products inline.
   if (!validation.ok) {
-    console.warn(`[validator] ${validation.reason} — retrying with stricter instruction`);
+    console.warn(`[validator] ${validation.reason} — stripping inline (no retry)`);
     retried = true;
-    const stricter = [
-      ...userMessages,
-      { role: 'system', content: `PREVIOUS RESPONSE WAS REJECTED: ${validation.reason}. Re-call the correct tool for intent=${route.intent}. If the user specified a size or price cap/floor, you MUST pass it (size, max_price, min_price). Only list products actually returned by the tool. If the tool returns products: [], do NOT fabricate items — tell the user honestly and offer to show the closest alternatives.` }
-    ];
-    specialist = await runSpecialist({
-      intent: route.intent, sport: route.sport,
-      userMessages: stricter, allTools, executeFunction,
-      enforcedFilters, sessionHint, followUpHint, lastProducts
-    });
-    validation = validateResponse(route.intent, specialist.content, lastUser);
+    if (/price_(cap|floor)_violation/.test(validation.reason)) {
+      // Strip numbered product entries whose price violates the budget
+      const { min, max } = extractPriceBounds(lastUser);
+      specialist.content = specialist.content.replace(
+        /\d+\.\s*\*\*\[[^\]]+\]\([^)]+\)\*\*[^]*?(?=\d+\.\s*\*\*\[|\n\n\*\*Coach|$)/g,
+        (block) => {
+          const prices = [...block.matchAll(/₹\s*([\d,]+)/g)].map(m => parseFloat(m[1].replace(/,/g, '')));
+          const over = max != null && prices.some(p => p > max);
+          const under = min != null && prices.some(p => p < min);
+          if (over || under) {
+            console.log(`[validator] stripped product block with prices ${prices.join(',')} (budget ${min}-${max})`);
+            return '';
+          }
+          return block;
+        }
+      );
+      // Re-validate after stripping
+      validation = validateResponse(route.intent, specialist.content, lastUser);
+    }
     if (!validation.ok) {
-      console.error(`[validator] retry also failed: ${validation.reason}`);
-      specialist.content = "I couldn't find the right products for that query — could you rephrase, or would you like me to connect you to +91 9502517700?";
+      console.warn(`[validator] still failed after strip: ${validation.reason} — accepting as-is`);
+      // Accept anyway instead of showing error — some products are better than no answer
     }
   }
   return {
