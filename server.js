@@ -1753,6 +1753,36 @@ app.get('/api/stock-debug', async (req, res) => {
   const sport = req.query.sport || 'tennis';
   const sku = req.query.sku; // deep-dive a single configurable SKU
   try {
+    // mode=scan: find ANY products with real stock in MSI
+    if (req.query.mode === 'scan') {
+      // Query MSI source-items with qty > 0
+      const scanResult = {};
+      try {
+        const msiParams = {
+          'searchCriteria[filter_groups][0][filters][0][field]': 'quantity',
+          'searchCriteria[filter_groups][0][filters][0][value]': 0,
+          'searchCriteria[filter_groups][0][filters][0][condition_type]': 'gt',
+          'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+          'searchCriteria[filter_groups][1][filters][0][value]': 1,
+          'searchCriteria[pageSize]': 20,
+          'searchCriteria[sortOrders][0][field]': 'quantity',
+          'searchCriteria[sortOrders][0][direction]': 'DESC'
+        };
+        let msiRes;
+        try { msiRes = await oauthGet('/inventory/source-items', msiParams); }
+        catch { msiRes = await magentoGet('/inventory/source-items', msiParams); }
+        scanResult.total_in_stock = msiRes.total_count || 0;
+        scanResult.top_stock = (msiRes.items || []).map(i => ({
+          sku: i.sku, source: i.source_code, qty: i.quantity, status: i.status
+        }));
+      } catch (e) { scanResult.msi_error = e.message; }
+      // Also try stockItems via OAuth for a known shoe child
+      try {
+        const si = await oauthGet(`/stockItems/TSH0011-10`);
+        scanResult.oauth_stockItem_test = { sku: 'TSH0011-10', qty: si.qty, is_in_stock: si.is_in_stock };
+      } catch (e) { scanResult.oauth_stockItem_error = e.message; }
+      return res.json(scanResult);
+    }
     // If a specific SKU is requested, do a deep stock analysis
     if (sku) {
       const deepResult = {};
