@@ -459,6 +459,7 @@
     // State
     let conversationHistory = [];
     let isLoading = false;
+    let sessionId = sessionStorage.getItem('to_session_id') || null;
 
     const chatContainer = document.getElementById('chatContainer');
     const messageInput = document.getElementById('messageInput');
@@ -587,10 +588,16 @@
       setTyping(true);
 
       try {
-        const response = await fetch('/api/chat', {
+        const headers = { 'Content-Type': 'application/json' };
+        if (sessionId) headers['X-Session-Id'] = sessionId;
+
+        const response = await fetch('/api/chat-agents', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: conversationHistory })
+          headers,
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: text }],
+            session_id: sessionId
+          })
         });
 
         const data = await response.json();
@@ -598,6 +605,11 @@
         if (data.error) {
           addMessage("I'm sorry, I encountered an issue. Please try again or contact us at +91 9502517700.", false);
         } else {
+          // Save session ID from server for memory persistence
+          if (data.session_id) {
+            sessionId = data.session_id;
+            sessionStorage.setItem('to_session_id', sessionId);
+          }
           const botMessage = data.message || "I'm sorry, I couldn't process that. Could you please rephrase?";
           addMessage(botMessage, false);
           conversationHistory.push({ role: 'assistant', content: botMessage });
@@ -615,6 +627,32 @@
 
     // Focus input on load
     messageInput.focus();
+
+    // Restore conversation from server on page load (memory feature)
+    async function restoreSession() {
+      if (!sessionId) return;
+      try {
+        const res = await fetch('/api/session-history', {
+          headers: { 'X-Session-Id': sessionId }
+        });
+        const data = await res.json();
+        if (data.history && data.history.length > 0) {
+          // Hide quick actions since there's prior conversation
+          if (quickActions) quickActions.style.display = 'none';
+          // Restore messages in the chat UI
+          data.history.forEach(msg => {
+            addMessage(msg.content, msg.role === 'user');
+          });
+          conversationHistory = data.history;
+          console.log('Restored ' + data.history.length + ' messages from session');
+        }
+      } catch (e) {
+        console.warn('Could not restore session:', e);
+      }
+    }
+
+    // Auto-restore on page load
+    restoreSession();
   </script>
 </body>
 </html>
