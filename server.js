@@ -358,22 +358,39 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
 // ==================== HELPERS ====================
 
 // Build product URL: prefer url_key, else derive from name; drop trailing SKU-like suffixes; ensure .html
-function buildProductUrl(urlKey, name, sku, sport = 'tennis') {
-  // Use Magento's canonical url_key as-is. It is the exact storefront slug.
-  let key = urlKey;
-  if (!key && name) {
-    key = name.toLowerCase()
-      .replace(/\+/g, '')
-      .replace(/[^a-z0-9\s-]/g, '')
-      .trim()
-      .replace(/\s+/g, '-')
-      .replace(/-+/g, '-');
-  }
-  if (!key) key = (sku || '').toLowerCase();
-  key = key.replace(/\.html?$/i, '');
-  key = key.replace(/-+/g, '-').replace(/^-|-$/g, '');
+// ==================== PRODUCT URL (v5.3.0) ====================
+// Uses Magento's own url_rewrites table via extension_attributes — the exact URL
+// the storefront links to. Falls back to url_key + .html, then to the ID-based
+// /catalog/product/view/id/ path which is guaranteed to resolve on every M2 install.
+function buildProductUrl(item, sport = 'tennis') {
   const storeUrl = getStoreUrl(sport);
-  return `${storeUrl}/${key}.html`;
+  const attrs = (item.custom_attributes || []).reduce((a, c) => { a[c.attribute_code] = c.value; return a; }, {});
+
+  // 1st choice: Magento's url_rewrites — the authoritative storefront URL.
+  // Requires the /products query to request `extension_attributes[url_rewrites]`.
+  const rewrites = item.extension_attributes?.url_rewrites;
+  if (Array.isArray(rewrites) && rewrites.length > 0) {
+    const rewrite = rewrites.find(r => r && r.url) || rewrites[0];
+    if (rewrite && rewrite.url) {
+      const path = String(rewrite.url).replace(/^\/+/, '');
+      return `${storeUrl}/${path}`;
+    }
+  }
+
+  // 2nd choice: url_key + .html — works on stores with flat URL rewrites.
+  if (attrs.url_key) {
+    const clean = String(attrs.url_key).replace(/\.html?$/i, '').replace(/^-|-$/g, '');
+    if (clean) return `${storeUrl}/${clean}.html`;
+  }
+
+  // 3rd choice: ID-based URL — guaranteed to 200 on every Magento install,
+  // regardless of SEO config. Magento will 301 to the canonical URL.
+  if (item.id) {
+    return `${storeUrl}/catalog/product/view/id/${item.id}`;
+  }
+
+  // Absolute last resort: homepage (should never be hit).
+  return storeUrl;
 }
 
 function extractCustomAttrs(item) {
@@ -616,61 +633,101 @@ async function getOrderStatus(orderId) {
   }
 }
 
-// ==================== BULK STOCK ====================
+// ==================== STOCK RESOLUTION (v5.3.0) ====================
+// Uses Magento 2's canonical condition_type=in filter — the same idiom Magento's
+// own SearchCriteriaBuilder emits. Previous versions chained N eq-filters which
+// triggers undefined behavior in M2 REST (silently returns empty or partial results).
+// Works on MSI, legacy cataloginventory, single-source, multi-source — every variant.
+// Returns: { [sku]: qty } where qty >= 1 means "customer can buy this right now".
 async function fetchStockMap(skus) {
   const map = {};
-  if (skus.length === 0) return map;
+  if (!skus || skus.length === 0) return map;
 
-  // MSI bulk query — accurate for SIMPLE products (they have source-item records).
-  // Configurable parents have NO source-items (stock lives on children), so they
-  // stay at 0 in the map. enrichConfigurables is responsible for resolving their
-  // real stock by summing children. This is by design — we do NOT fall back to
-  // /stockItems because its is_in_stock flag can be stale (Magento index not rerun).
-  try {
-    const params = { 'searchCriteria[pageSize]': Math.min(skus.length * 3, 500) };
-    skus.forEach((sku, i) => {
-      params[`searchCriteria[filter_groups][0][filters][${i}][field]`] = 'sku';
-      params[`searchCriteria[filter_groups][0][filters][${i}][value]`] = sku;
-      params[`searchCriteria[filter_groups][0][filters][${i}][condition_type]`] = 'eq';
-    });
-    let res;
-    try { res = await oauthGet('/inventory/source-items', params); }
-    catch { res = await magentoGet('/inventory/source-items', params); }
-    if (res.items && res.items.length > 0) {
-      res.items.forEach(it => {
-        const s = it.sku;
-        map[s] = (map[s] || 0) + parseFloat(it.quantity || 0);
-      });
-    }
-  } catch (e) {
-    console.log('MSI bulk stock failed:', e.response?.status);
+  // De-dupe and sanitize
+  const uniqueSkus = [...new Set(skus.filter(s => s && typeof s === 'string'))];
+  if (uniqueSkus.length === 0) return map;
+
+  // Batch into groups of 40 — stays under URL length limits on every Magento install.
+  const BATCH_SIZE = 40;
+  const batches = [];
+  for (let i = 0; i < uniqueSkus.length; i += BATCH_SIZE) {
+    batches.push(uniqueSkus.slice(i, i + BATCH_SIZE));
   }
 
-  // Fallback: if MSI returned 0 for ALL requested SKUs, the store likely manages
-  // stock in legacy cataloginventory (stockItems) rather than MSI.
-  // Try fetching from /stockItems/{sku} via OAuth (bearer returns 401 on this endpoint).
-  const allZero = skus.every(s => (map[s] || 0) === 0);
-  if (allZero && skus.length > 0) {
-    console.log(`[stockMap] MSI returned 0 for all ${skus.length} SKUs — trying cataloginventory fallback`);
-    const CAP = 25; // avoid excessive sequential requests
-    const batch = skus.slice(0, CAP);
-    const results = await Promise.allSettled(
-      batch.map(async (sku) => {
-        try {
-          const si = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`);
-          if (si && parseFloat(si.qty) > 0 && si.is_in_stock) {
-            map[sku] = parseFloat(si.qty);
-          }
-        } catch (err) {
-          // If OAuth also 401s, we can't get stock from this endpoint either
-          if (err.response?.status === 401) {
-            console.log(`[stockMap] cataloginventory 401 for ${sku} — OAuth lacks access too`);
-          }
+  // Canonical Magento 2 REST idiom for "sku IN (a,b,c)":
+  // ONE filter, comma-joined value, condition_type=in. This is what Magento's
+  // own SearchCriteriaBuilder emits. Chaining N eq-filters is undefined behavior.
+  const fetchSourceItems = async (batch) => {
+    const params = {
+      'searchCriteria[filter_groups][0][filters][0][field]': 'sku',
+      'searchCriteria[filter_groups][0][filters][0][value]': batch.join(','),
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'in',
+      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+      'searchCriteria[filter_groups][1][filters][0][value]': 1,
+      'searchCriteria[filter_groups][1][filters][0][condition_type]': 'eq',
+      'searchCriteria[pageSize]': batch.length * 5
+    };
+    try {
+      // OAuth first (admin access; source-items sometimes rejects bearer).
+      let res;
+      try { res = await oauthGet('/inventory/source-items', params); }
+      catch (oauthErr) {
+        if (oauthErr.response?.status === 401 || oauthErr.response?.status === 404) {
+          res = await magentoGet('/inventory/source-items', params);
+        } else { throw oauthErr; }
+      }
+      for (const it of (res?.items || [])) {
+        // status=1 means source-item is enabled; don't count disabled warehouses.
+        if (it.status === 0) continue;
+        const s = it.sku;
+        map[s] = (map[s] || 0) + parseFloat(it.quantity || 0);
+      }
+    } catch (e) {
+      console.log(`[stockMap] MSI batch failed (${batch.length}):`, e.response?.status || e.message);
+    }
+  };
+
+  // Run batches with bounded concurrency.
+  const CONCURRENCY = 3;
+  const queue = [...batches];
+  await Promise.all(
+    Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+      while (queue.length) {
+        const batch = queue.shift();
+        if (batch) await fetchSourceItems(batch);
+      }
+    })
+  );
+
+  // If EVERY SKU came back zero, the store likely runs legacy cataloginventory
+  // (MSI not enabled or not populated). Fall back to /stockItems/{sku}
+  // which works on both. This is Magento's own storefront check.
+  const allZero = uniqueSkus.every(s => !map[s] || map[s] === 0);
+  if (allZero) {
+    console.log(`[stockMap] MSI empty — falling back to /stockItems for ${uniqueSkus.length} SKUs`);
+    const CAP = 50;
+    const subset = uniqueSkus.slice(0, CAP);
+    await Promise.all(subset.map(async (sku) => {
+      try {
+        // /V1/stockItems/{sku} works with bearer on most installs and
+        // returns the salable qty Magento uses on the storefront.
+        const si = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`);
+        const qty = parseFloat(si?.qty || 0);
+        const inStock = si?.is_in_stock === true;
+        if (inStock && qty > 0) map[sku] = qty;
+        else if (inStock && qty === 0) map[sku] = 1; // in-stock but no managed qty (backorder allowed)
+      } catch (err) {
+        // Last-ditch via OAuth if bearer 401'd
+        if (err.response?.status === 401) {
+          try {
+            const si = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`);
+            const qty = parseFloat(si?.qty || 0);
+            if (si?.is_in_stock && qty > 0) map[sku] = qty;
+            else if (si?.is_in_stock) map[sku] = 1;
+          } catch { /* give up silently for this SKU */ }
         }
-      })
-    );
-    const found = Object.values(map).filter(v => v > 0).length;
-    console.log(`[stockMap] cataloginventory fallback: ${found}/${batch.length} SKUs have stock`);
+      }
+    }));
   }
 
   return map;
@@ -689,7 +746,7 @@ function shapeProduct(item, qty, sport = 'tennis') {
     special_price: attrs.special_price ? parseFloat(attrs.special_price) : null,
     brand: brandLabel,
     short_description: attrs.short_description ? String(attrs.short_description).replace(/<[^>]*>/g, '').substring(0, 200) : null,
-    product_url: buildProductUrl(attrs.url_key, item.name, item.sku, sport),
+    product_url: buildProductUrl(item, sport),
     image: attrs.image ? `${getStoreUrl(sport)}/media/catalog/product${attrs.image}` : null,
     qty,
     magento_in_stock: magentoStockItem ? !!magentoStockItem.is_in_stock : null
@@ -750,7 +807,9 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
       // Real stock verification happens downstream via fetchStockMap + enrichConfigurables.
       'searchCriteria[pageSize]': Math.min(fetchSize, 100),
       'searchCriteria[sortOrders][0][field]': 'created_at',
-      'searchCriteria[sortOrders][0][direction]': 'DESC'
+      'searchCriteria[sortOrders][0][direction]': 'DESC',
+      // Request url_rewrites so buildProductUrl gets the canonical storefront URL.
+      'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
     };
     const result = await magentoGet('/products', params);
     if (!result.items || result.items.length === 0) {
@@ -758,7 +817,7 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
 
     const inStock = shaped.filter(isProductAvailable);
@@ -804,7 +863,8 @@ function buildSearchParams(pattern, pageSize) {
     // NOTE: removed quantity_and_stock_status pre-filter — stock verified downstream.
     'searchCriteria[pageSize]': Math.min(pageSize, 100),
     'searchCriteria[sortOrders][0][field]': 'name',
-    'searchCriteria[sortOrders][0][direction]': 'ASC'
+    'searchCriteria[sortOrders][0][direction]': 'ASC',
+    'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
   };
 }
 
@@ -896,7 +956,10 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       if (match) filters.push({ group: idx++, field: code, value: match[0] });
     }
 
-    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 2, 40) };
+    const params = {
+      'searchCriteria[pageSize]': Math.min(page_size * 2, 40),
+      'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
+    };
     filters.forEach(f => {
       params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
       params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
@@ -985,7 +1048,10 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
       filters.push({ group: idx++, field: 'category_id', value: SKILL_CATS[String(skill_level).toLowerCase()] });
     }
 
-    const params = { 'searchCriteria[pageSize]': Math.min(page_size * 2, 40) };
+    const params = {
+      'searchCriteria[pageSize]': Math.min(page_size * 2, 40),
+      'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]],configurable_product_options],total_count'
+    };
     filters.forEach(f => {
       params[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
       params[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
