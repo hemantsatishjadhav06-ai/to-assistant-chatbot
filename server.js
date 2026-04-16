@@ -1483,11 +1483,27 @@ app.post('/api/chat-agents', async (req, res) => {
       sessionStore.addMessage(sessionId, 'user', lastUser);
     }
 
-    // Humanized session hint for the LLM (only if there's prior context).
+    // Humanized session hint for the LLM — includes slot context + brief conversation summary
     const turns = sessionStore.get(sessionId).turns || 0;
-    const sessionHint = (turns > 1 && prior && Object.keys(prior).some(k => prior[k] != null && k !== '_rendered'))
-      ? `Previous turn slots: ${slotParser.renderSlotsHint(prior) || '(none)'}. Current merged slots: ${merged._rendered || '(none)'}`
-      : '';
+    let sessionHint = '';
+    if (turns > 1) {
+      const parts = [];
+      // Slot context
+      if (prior && Object.keys(prior).some(k => prior[k] != null && k !== '_rendered')) {
+        parts.push(`Previous slots: ${slotParser.renderSlotsHint(prior) || '(none)'}. Current merged: ${merged._rendered || '(none)'}`);
+      }
+      // Brief conversation summary from last 2 assistant responses (so LLM knows what it just recommended)
+      const recentAssistant = serverHistory.filter(m => m.role === 'assistant').slice(-2);
+      if (recentAssistant.length > 0) {
+        const summaries = recentAssistant.map(m => {
+          // Truncate to first 300 chars to keep token usage reasonable
+          const text = (m.content || '').slice(0, 300);
+          return text.length >= 300 ? text + '...' : text;
+        });
+        parts.push(`Your recent responses to this customer: ${summaries.join(' | ')}`);
+      }
+      sessionHint = parts.join('. ');
+    }
 
     console.log(`[session:${sessionId}] turn=${turns} history=${serverHistory.length}msgs slots={${merged._rendered}}`);
 
