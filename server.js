@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { masterHandle } = require('./agents');
 const slotParser = require('./parser');
+const { normalizeQuery } = require('./normalizer');
 const sessionStore = require('./session');
 
 const app = express();
@@ -1793,26 +1794,40 @@ app.post('/api/chat-agents', async (req, res) => {
     }
 
     const prior = sessionStore.get(sessionId).slots || {};
-    const fresh = slotParser.parseSlots(lastUser);
-    const merged = slotParser.mergeSlots(prior, fresh);
 
-    // v5.5.0: Follow-up detection — inherit previous intent on refinement utterances.
+    // v5.6.0: LLM query normalizer runs FIRST. Transforms messy real-world
+    // messages ("i like to play... bat... 20K to 30K") into a clean spec.
+    // Falls back gracefully to regex parser if the LLM call fails.
+    const conversationHistoryForNormalizer = sessionStore.getHistory(sessionId);
+    const normResult = await normalizeQuery(lastUser, conversationHistoryForNormalizer);
+    const fresh = slotParser.parseSlots(lastUser);
+    let merged = slotParser.mergeSlots(prior, fresh);
+    if (normResult.ok && normResult.spec) {
+      merged = slotParser.slotsFromSpec(normResult.spec, merged);
+      merged._normalizer_spec = normResult.spec;
+    }
+
+    // v5.5.0 + v5.6.0: Follow-up detection — prefer normalizer's is_follow_up flag.
     const followUp = slotParser.detectFollowUp(lastUser);
     let followUpHint = '';
     const lastIntent = sessionStore.getLastIntent(sessionId);
-    if (followUp) {
-      followUpHint = followUp.hint || '';
-      // Inherit the previous intent so router can't drift
+    const isFollowUpDetected = (normResult.spec?.is_follow_up) || !!followUp;
+
+    if (isFollowUpDetected) {
+      const refinementType = normResult.spec?.refinement_type || followUp?.type || 'more';
+      followUpHint = `Follow-up refinement detected: ${refinementType}. Customer wants to refine/continue the PREVIOUS search — stay in the same product domain.`;
       if (lastIntent && !merged.intent_hint) {
         merged.intent_hint = lastIntent;
-        console.log(`[session:${sessionId}] follow-up "${followUp.type}" — inheriting intent=${lastIntent}`);
+        console.log(`[session:${sessionId}] follow-up "${refinementType}" — inheriting intent=${lastIntent}`);
       }
-      // Quantity override
-      if (followUp.page_size) {
+      if (merged.quantity) {
+        merged._page_size = merged.quantity;
+        followUpHint += ` Use page_size=${merged.quantity}.`;
+      } else if (followUp?.page_size) {
         merged._page_size = followUp.page_size;
         followUpHint += ` Use page_size=${followUp.page_size}.`;
       }
-      merged._follow_up = followUp.type;
+      merged._follow_up = refinementType;
     }
 
     merged._rendered = slotParser.renderSlotsHint(merged);
@@ -1880,6 +1895,22 @@ app.post('/api/chat-agents', async (req, res) => {
     const detectedSport = merged.sport || 'tennis';
     const sportBoundExecute = (name, args) => executeFunction(name, args, detectedSport);
 
+    // v5.6.0: Build enriched session hint from normalized spec bits
+    const specBits = [];
+    if (merged.normalized_query) specBits.push(`query="${merged.normalized_query}"`);
+    if (merged.brand) specBits.push(`brand=${merged.brand}`);
+    if (merged.model) specBits.push(`model=${merged.model}`);
+    if (merged.sport) specBits.push(`sport=${merged.sport}`);
+    if (merged.skill_level) specBits.push(`skill_level=${merged.skill_level}`);
+    if (merged.playing_style) specBits.push(`playing_style=${merged.playing_style}`);
+    if (merged.size) specBits.push(`size=${merged.size}`);
+    if (merged.min_price != null) specBits.push(`min_price=${merged.min_price}`);
+    if (merged.max_price != null) specBits.push(`max_price=${merged.max_price}`);
+    if (merged._page_size) specBits.push(`page_size=${merged._page_size}`);
+    const enrichedSessionHint = specBits.length
+      ? `${sessionHint || ''} [NORMALIZED SPEC — USE THESE VALUES VERBATIM] ${specBits.join(', ')}`
+      : sessionHint;
+
     // v5.5.0: 27s deadline so we respond before Render's 30s gateway kills us.
     const DEADLINE_MS = 27000;
     const deadline = new Promise((_, reject) => setTimeout(() => reject(new Error('deadline_exceeded')), DEADLINE_MS));
@@ -1889,9 +1920,10 @@ app.post('/api/chat-agents', async (req, res) => {
         allTools: FUNCTION_DEFINITIONS,
         executeFunction: sportBoundExecute,
         slots: merged,
-        sessionHint,
+        sessionHint: enrichedSessionHint,
         followUpHint,
-        lastProducts
+        lastProducts,
+        normalizedSpec: normResult.spec || null
       }),
       deadline
     ]);
