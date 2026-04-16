@@ -1,6 +1,6 @@
 {
   "name": "to-assistant-chatbot",
-  "version": "5.6.1",
+  "version": "5.7.0",
   "description": "TO Assistant - AI Customer Support Chatbot for TennisOutlet.in",
   "main": "server.js",
   "scripts": {
