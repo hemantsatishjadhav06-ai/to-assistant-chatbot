@@ -1076,9 +1076,9 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
 
     const inStock = shaped.filter(isProductAvailable);
     let pool = inStock;
-    // v6.0.4: NOW PASSING size so applyPriceSizeFilters can actually filter by size
+    // v6.0.5: DO NOT filter by size — return ALL in-stock shoes, LLM handles size from specs.available_sizes
     const beforeCustomer = pool.length;
-    pool = applyPriceSizeFilters(pool, { min_price, max_price, size });
+    pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
     let available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
     let message = null;
