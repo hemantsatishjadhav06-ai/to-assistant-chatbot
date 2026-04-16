@@ -1030,6 +1030,109 @@ const SHOE_CATEGORIES = { tennis: 24, pickleball: 253, padel: 274 };
 
 async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = null, court_type = null, width = null, cushioning = null, size = null, min_price = null, max_price = null, page_size = 10 } = {}) {
   try {
+    // ==================== v6.0.6: SIZE-BY-NAME FAST PATH ====================
+    // When size is requested, search for SIMPLE child products whose name/SKU ends
+    // with the size (e.g. "TSH0010-10" for size 10). These have real prices and real
+    // stock — no enrichment needed. Zero extra API calls, zero timeouts.
+    if (size) {
+      const sizeStr = String(size).trim();
+      const sportKey = String(sport || 'tennis').toLowerCase();
+      const catIds = sportKey === 'all' ? [24, 253, 274] : [SHOE_CATEGORIES[sportKey] || 24];
+      const sizeFilters = [];
+      let si = 0;
+      // Category filter
+      if (catIds.length > 1) {
+        sizeFilters.push({ group: si++, field: 'category_id', value: catIds.join(','), conditionType: 'in' });
+      } else {
+        sizeFilters.push({ group: si++, field: 'category_id', value: String(catIds[0]) });
+      }
+      sizeFilters.push({ group: si++, field: 'status', value: 1 });
+      // Search for simple products — name ends with "-{size}" (e.g. "-10", "-9.5")
+      sizeFilters.push({ group: si++, field: 'name', value: `%-${sizeStr}`, conditionType: 'like' });
+      if (brand) {
+        const bid = brandNameToId(brand);
+        if (bid) sizeFilters.push({ group: si++, field: 'brands', value: bid });
+      }
+      const sizeParams = {
+        'searchCriteria[pageSize]': 50,
+        'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]]],total_count'
+      };
+      sizeFilters.forEach(f => {
+        sizeParams[`searchCriteria[filter_groups][${f.group}][filters][0][field]`] = f.field;
+        sizeParams[`searchCriteria[filter_groups][${f.group}][filters][0][value]`] = f.value;
+        if (f.conditionType) sizeParams[`searchCriteria[filter_groups][${f.group}][filters][0][conditionType]`] = f.conditionType;
+      });
+
+      const sizeResult = await magentoGet('/products', sizeParams);
+      if (sizeResult.items && sizeResult.items.length > 0) {
+        // Get real stock for all found SKUs
+        const sizeSkus = sizeResult.items.map(i => i.sku);
+        const sizeStockMap = await fetchStockMap(sizeSkus);
+
+        // Shape and filter to qty >= 1 ONLY
+        const sized = sizeResult.items
+          .map(item => shapeProduct(item, sizeStockMap[item.sku] || 0, sport))
+          .filter(p => p && (p.qty || 0) >= 1);
+
+        // Deduplicate by parent SKU — keep only one per parent shoe model
+        // Parent SKU = everything before the last "-" (e.g. "TSH0010-10" -> "TSH0010")
+        const seen = new Map();
+        for (const p of sized) {
+          const parentSku = p.sku.replace(/-[^-]+$/, '');
+          if (!seen.has(parentSku) || (p.qty || 0) > (seen.get(parentSku).qty || 0)) {
+            // Strip the size suffix from the name for cleaner display
+            // "ASICS Court Slide 3 Men's Shoe - Black & White-10" -> "ASICS Court Slide 3 Men's Shoe - Black & White"
+            p.parent_sku = parentSku;
+            p.size_in_stock = sizeStr;
+            seen.set(parentSku, p);
+          }
+        }
+        let uniqueShoes = Array.from(seen.values());
+
+        // Apply price filters
+        if (min_price || max_price) {
+          const minP = min_price ? parseFloat(min_price) : null;
+          const maxP = max_price ? parseFloat(max_price) : null;
+          uniqueShoes = uniqueShoes.filter(p => {
+            const pr = parseFloat(p.price || 0);
+            if (pr <= 0) return true;
+            if (maxP && pr > maxP) return false;
+            if (minP && pr < minP) return false;
+            return true;
+          });
+        }
+
+        const finalShoes = uniqueShoes
+          .sort((a, b) => (b.qty || 0) - (a.qty || 0))
+          .slice(0, Math.min(page_size, 20));
+
+        // Clean internal fields
+        for (const p of finalShoes) {
+          p.in_stock = true;
+          delete p._children;
+          delete p.type_id;
+          delete p.magento_in_stock;
+          delete p._children_loaded;
+          delete p._stock_source;
+        }
+
+        if (finalShoes.length > 0) {
+          return {
+            sport,
+            filters_applied: { brand, shoe_type, court_type, width, cushioning, size: sizeStr, min_price, max_price },
+            products: finalShoes,
+            total: sizeResult.total_count,
+            showing: finalShoes.length,
+            filtered_out: sized.length - finalShoes.length,
+            message: `Showing ${finalShoes.length} shoes available in size ${sizeStr}. All sizes can be selected on each product page.`
+          };
+        }
+        // If all size matches had qty=0, fall through to the normal flow below
+      }
+      // If no size matches found at all, fall through to normal flow with a note
+    }
+    // ==================== END SIZE-BY-NAME FAST PATH ====================
+
     // If sport is generic/null/all, we'll search the primary sport category.
     // The "all sports" search is handled below as a multi-category merge.
     const sportKey = String(sport || 'tennis').toLowerCase();
