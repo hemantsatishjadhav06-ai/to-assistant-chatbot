@@ -281,6 +281,13 @@ async function runSpecialist({ intent, sport, userMessages, allTools, executeFun
       content: `[SESSION CONTEXT] ${sessionHint}. If the current user message is a short follow-up, combine it with the filters above to continue — do not start over.`
     });
   }
+  // v5.6.0: TOOL CALL DIRECTIVE — force the specialist to call tools on first turn
+  if (tools.length > 0) {
+    messages.push({
+      role: 'system',
+      content: `[TOOL CALL DIRECTIVE] You MUST call one of your tools on the FIRST turn. The normalizer has already parsed the customer's intent — the data you need is in [ENFORCED FILTERS] and [SESSION CONTEXT]. Translate those values into tool arguments and call immediately. Do NOT ask the customer to clarify what was already parsed. Do NOT respond with text-only on the first turn if you have tools available.`
+    });
+  }
   messages.push(...userMessages);
 
   let data = await callLLM({ model: OPENROUTER_MODEL, messages, tools, tool_choice: tools.length ? 'auto' : 'none' });
@@ -379,13 +386,14 @@ function validateResponse(intent, content, userText = '') {
 }
 
 // ==================== MASTER ORCHESTRATOR ====================
-async function masterHandle({ userMessages, allTools, executeFunction, slots = null, sessionHint = '', followUpHint = '', lastProducts = [] }) {
+async function masterHandle({ userMessages, allTools, executeFunction, slots = null, sessionHint = '', followUpHint = '', lastProducts = [], normalizedSpec = null }) {
   const lastUser = [...userMessages].reverse().find(m => m.role === 'user')?.content || '';
-  // If slots include an intent_hint from the deterministic parser, prefer it
-  // over the LLM router (router is fine, but regex is free and always right
-  // on unambiguous cases like "shoe size 11 under 6K").
+  // v5.6.0 routing priority: normalizer (conf>=0.6) > deterministic parser > LLM router
   let route;
-  if (slots && slots.intent_hint) {
+  if (normalizedSpec && normalizedSpec.intent && normalizedSpec.confidence >= 0.6) {
+    const intentMap = { racquet: 'racquet', shoe: 'shoe', ball: 'catalog', string: 'catalog', bag: 'catalog', overgrip: 'catalog', accessory: 'catalog', ball_machine: 'catalog', order: 'order', policy: 'policy', brand: 'brand', review: 'review', greeting: 'greeting', other: 'other' };
+    route = { intent: intentMap[normalizedSpec.intent] || normalizedSpec.intent, sport: normalizedSpec.sport || slots?.sport || 'tennis', confidence: normalizedSpec.confidence, source: 'normalizer' };
+  } else if (slots && slots.intent_hint) {
     route = { intent: slots.intent_hint, sport: slots.sport || 'tennis', confidence: 0.99, source: 'deterministic' };
   } else {
     route = await routeIntent(lastUser, userMessages.filter(m => m.role === 'user' || m.role === 'assistant'));
