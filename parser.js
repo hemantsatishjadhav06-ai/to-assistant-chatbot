@@ -277,6 +277,11 @@ function detectFollowUp(text) {
     return { type: 'price_refine', hint: 'Customer wants the SAME category but at a different price tier. Keep category/brand/sport; adjust min_price or max_price accordingly.' };
   }
 
+  // v6.0.2: "in 11k", "at 9k", "under 15k", "within 10k", "around 5000" — bare price expression is a follow-up
+  if (/^(in|at|around|within|under|below|above|over|upto|up to|less than|more than)?\s*[\u20B9]?\s*\d[\d.,]*\s*(k|K|lakh|lakhs|l)?\s*$/.test(s)) {
+    return { type: 'price_refine', hint: 'Customer is adjusting the PRICE constraint for the same product category. Keep all other filters (category, sport, size); update only the price range.' };
+  }
+
   // "the first/second/third one" — selection from last list
   if (/^(the |that |this )?(first|second|third|fourth|fifth|last|1st|2nd|3rd|4th|5th|#?\s*\d)\s*(one|option|product|shoe|racquet)?\.?\s*$/i.test(s)) {
     return { type: 'select', hint: 'Customer is referring to a product from the PREVIOUS list. Do NOT re-search. Look at the previous assistant turn and elaborate on the chosen product.' };
