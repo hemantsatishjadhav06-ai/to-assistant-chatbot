@@ -644,6 +644,33 @@ async function fetchStockMap(skus) {
     console.log('MSI bulk stock failed:', e.response?.status);
   }
 
+  // Fallback: if MSI returned 0 for ALL requested SKUs, the store likely manages
+  // stock in legacy cataloginventory (stockItems) rather than MSI.
+  // Try fetching from /stockItems/{sku} via OAuth (bearer returns 401 on this endpoint).
+  const allZero = skus.every(s => (map[s] || 0) === 0);
+  if (allZero && skus.length > 0) {
+    console.log(`[stockMap] MSI returned 0 for all ${skus.length} SKUs — trying cataloginventory fallback`);
+    const CAP = 25; // avoid excessive sequential requests
+    const batch = skus.slice(0, CAP);
+    const results = await Promise.allSettled(
+      batch.map(async (sku) => {
+        try {
+          const si = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`);
+          if (si && parseFloat(si.qty) > 0 && si.is_in_stock) {
+            map[sku] = parseFloat(si.qty);
+          }
+        } catch (err) {
+          // If OAuth also 401s, we can't get stock from this endpoint either
+          if (err.response?.status === 401) {
+            console.log(`[stockMap] cataloginventory 401 for ${sku} — OAuth lacks access too`);
+          }
+        }
+      })
+    );
+    const found = Object.values(map).filter(v => v > 0).length;
+    console.log(`[stockMap] cataloginventory fallback: ${found}/${batch.length} SKUs have stock`);
+  }
+
   return map;
 }
 
