@@ -1006,67 +1006,73 @@ function listBrands() {
 // unions the results, so we return every ball-machine-shaped product the
 // catalog has, even if a category wasn't indexed or the search stopped short.
 async function getBallMachines({ page_size = 10, min_price = null, max_price = null } = {}) {
-  // v4.6.0: run all three strategies IN PARALLEL with a hard 18s ceiling each.
-  // Short-circuit once we have enough to avoid Render 30s request timeout.
+  // v4.7.2: FAST-PATH first (single Magento call), then parallel fallback only if needed.
+  // Previous versions ran 15+ concurrent Magento calls which overwhelmed the server.
   const seen = new Map();
   const withTimeout = (p, ms) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error('strat-timeout')), ms))]);
 
-  const stratA = (async () => {
-    for (const catId of BALL_MACHINE_CATEGORY_IDS) {
-      try {
-        const byCat = await getProductsByCategory(catId, 20, { min_price, max_price });
-        for (const p of (byCat.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
-      } catch {}
-    }
-  })();
-
-  const stratB = (async () => {
-    const queries = ['ball machine', 'ball thrower', 'ball cannon', 'ball launcher', 'ball feeder', 'ai ball'];
-    await Promise.all(queries.map(async q => {
-      try {
-        const bySearch = await searchProducts(q, 10, { min_price, max_price });
-        for (const p of (bySearch.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
-      } catch {}
-    }));
-  })();
-
-  // v4.7.0: broadened — url_key OR name OR sku LIKE patterns; covers "Tenniix AI Ball Machine".
+  // Helper: run a single LIKE query against Magento, shape results into seen map.
   const runLike = async (field, value) => {
-    try {
-      const params = {
-        'searchCriteria[filter_groups][0][filters][0][field]': field,
-        'searchCriteria[filter_groups][0][filters][0][value]': value,
-        'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
-        'searchCriteria[filter_groups][1][filters][0][field]': 'status',
-        'searchCriteria[filter_groups][1][filters][0][value]': 1,
-        'searchCriteria[pageSize]': 20
-      };
-      const result = await magentoGet('/products', params);
-      if (result.items && result.items.length) {
-        const skus = result.items.map(i => i.sku);
-        const stockMap = await fetchStockMap(skus);
-        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
-        await enrichConfigurables(shaped);
-        for (const p of shaped) if (!seen.has(p.sku)) seen.set(p.sku, p);
-      }
-    } catch {}
+    const params = {
+      'searchCriteria[filter_groups][0][filters][0][field]': field,
+      'searchCriteria[filter_groups][0][filters][0][value]': value,
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'like',
+      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+      'searchCriteria[filter_groups][1][filters][0][value]': 1,
+      'searchCriteria[pageSize]': 20
+    };
+    const result = await magentoGet('/products', params);
+    if (result.items && result.items.length) {
+      const skus = result.items.map(i => i.sku);
+      const stockMap = await fetchStockMap(skus);
+      const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0));
+      // These are simple products — enrichConfigurables is a no-op, skip it to save time.
+      for (const p of shaped) if (!seen.has(p.sku)) seen.set(p.sku, p);
+    }
   };
-  const stratC = (async () => {
-    await Promise.all([
-      runLike('url_key', '%ball%machine%'),
-      runLike('url_key', '%ai%ball%'),
-      runLike('name',    '%ball machine%'),
-      runLike('name',    '%ai ball%'),
-      runLike('name',    '%tenniix%'),
-      runLike('sku',     '%tenniix%')
-    ]);
-  })();
 
-  await Promise.allSettled([
-    withTimeout(stratA, 18000),
-    withTimeout(stratB, 18000),
-    withTimeout(stratC, 18000)
-  ]);
+  // === FAST PATH: sequential, lightweight — catches the known ball-machine products ===
+  const fastQueries = [
+    ['name', '%ball machine%'],
+    ['name', '%tenniix%'],
+    ['name', '%ai ball%'],
+    ['url_key', '%ball%machine%']
+  ];
+  for (const [field, pattern] of fastQueries) {
+    try { await runLike(field, pattern); } catch (e) { console.error('[BM fast]', field, pattern, e.message); }
+    if (seen.size >= 2) break;   // got enough, skip remaining fast queries
+  }
+
+  // === FALLBACK: only if fast path found nothing, run heavier strategies with timeouts ===
+  if (seen.size === 0) {
+    console.log('[BM] fast path empty, running full parallel fallback');
+    const stratA = (async () => {
+      for (const catId of BALL_MACHINE_CATEGORY_IDS) {
+        try {
+          const byCat = await getProductsByCategory(catId, 20, { min_price, max_price });
+          for (const p of (byCat.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
+        } catch {}
+      }
+    })();
+    const stratB = (async () => {
+      const queries = ['ball machine', 'ball thrower', 'ball cannon', 'ball launcher', 'ball feeder', 'ai ball'];
+      for (const q of queries) {
+        try {
+          const bySearch = await searchProducts(q, 10, { min_price, max_price });
+          for (const p of (bySearch.products || [])) if (!seen.has(p.sku)) seen.set(p.sku, p);
+        } catch {}
+        if (seen.size >= 6) break;
+      }
+    })();
+    const stratC = (async () => {
+      const likeQueries = [['url_key','%ai%ball%'],['name','%ball cannon%'],['name','%ball thrower%'],['sku','%tenniix%']];
+      for (const [f,v] of likeQueries) {
+        try { await runLike(f, v); } catch {}
+        if (seen.size >= 6) break;
+      }
+    })();
+    await Promise.allSettled([withTimeout(stratA, 15000), withTimeout(stratB, 15000), withTimeout(stratC, 15000)]);
+  }
 
   let pool = [...seen.values()].filter(p => (p.qty || 0) >= 1);
   if (pool.length === 0) pool = [...seen.values()];
