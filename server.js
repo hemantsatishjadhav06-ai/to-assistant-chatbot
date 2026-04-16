@@ -133,6 +133,7 @@ PRODUCT PRESENTATION RULES (MANDATORY — NEVER SKIP):
 - The product_url is already in every product object the tool returns. Copy it exactly into the markdown link parentheses. The URL already points to the correct store (tennisoutlet.in, pickleballoutlet.in, or padeloutlet.in) based on the sport. Example: if the tool returns product_url: "https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html", write: **[Joola Hyperion Vision 16 mm - Storm Blue](https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html)**
 - If you list a product WITHOUT a clickable link, the response is BROKEN and unusable. Always include the link.
 - NEVER show quantity/stock numbers to the customer.
+- ONLY recommend products where in_stock is true. If a product has in_stock: false or qty: 0, SKIP it entirely — do not mention it.
 - NEVER use markdown images ![]().
 - NEVER add target="_blank" or raw HTML attributes in your text.
 - The tool returns products sorted highest-qty first. Feature the FIRST product prominently as the recommended upsell pick.
@@ -710,11 +711,10 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-    const allZero = Object.values(stockMap).every(v => !v);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
-    let pool = inStock.length ? inStock : (allZero ? shaped : []);
+    let pool = inStock;  // STRICT: only show products with qty >= 1
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
@@ -791,11 +791,10 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-    const allZero = Object.values(stockMap).every(v => !v);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
-    let pool = inStock.length ? inStock : (allZero ? shaped : []);
+    let pool = inStock;  // STRICT: only show products with qty >= 1
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
@@ -857,12 +856,11 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-    const allZero = Object.values(stockMap).every(v => !v);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     // Enrich configurable parents with child prices + summed child stock BEFORE filtering.
     await enrichConfigurables(shaped, !!size);  // forceAll when size filter active
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
-    let pool = inStock.length ? inStock : (allZero ? shaped : []);
+    let pool = inStock;  // STRICT: only show products with qty >= 1
     // Customer-requested filters: size, min_price, max_price.
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price, size });
@@ -874,7 +872,7 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     // return ALL shoes without size filter + a note about selecting size on product page.
     if (available.length === 0 && size && beforeCustomer > 0) {
       // Retry without size filter — show what's available
-      const fallback = applyPriceSizeFilters(inStock.length ? inStock : shaped, { min_price, max_price, size: null });
+      const fallback = applyPriceSizeFilters(inStock, { min_price, max_price, size: null });
       const fallbackAvail = fallback.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
       stripInternals(fallbackAvail);
       if (fallbackAvail.length > 0) {
@@ -950,11 +948,10 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     }
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-    const allZero = Object.values(stockMap).every(v => !v);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+        const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);
     const inStock = shaped.filter(p => (p.qty || 0) >= 1);
-    let pool = inStock.length ? inStock : (allZero ? shaped : []);
+    let pool = inStock;  // STRICT: only show products with qty >= 1
     const beforeCustomer = pool.length;
     pool = applyPriceSizeFilters(pool, { min_price, max_price });
     const filtered_out = beforeCustomer - pool.length;
@@ -982,8 +979,9 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
 // Magento stores price=0 and qty=0 on configurable parents; real values live on children.
 // After this runs, p.price / p.price_max / p.qty reflect the child aggregate, and
 // p._children holds per-child {sku, price, qty, size} for downstream size/price filtering.
-async function enrichConfigurables(products, forceAll = false) {
-  // forceAll=true when size filter is requested — we need _children for ALL products to check sizes
+async function enrichConfigurables(products, forceAll = true) {
+  // forceAll=true by default — configurable parents often have qty=0 (stock on children).
+  // We MUST load children for accurate stock, even if parent has a price.
   const targets = forceAll
     ? products.filter(p => p != null)
     : products.filter(p => p && (!p.price || p.price === 0 || !p.qty || p.qty === 0));
@@ -1066,7 +1064,11 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
 
 // Strip internal-only fields before returning to the LLM (keeps payload small).
 function stripInternals(products) {
-  (products || []).forEach(p => { if (p && p._children) delete p._children; });
+  (products || []).forEach(p => {
+    if (p && p._children) delete p._children;
+    // Add explicit in_stock flag so LLM never shows unavailable products
+    if (p) p.in_stock = (p.qty || 0) >= 1;
+  });
   return products;
 }
 
@@ -1149,8 +1151,7 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
     await Promise.allSettled([withTimeout(stratA, 15000), withTimeout(stratB, 15000), withTimeout(stratC, 15000)]);
   }
 
-  let pool = [...seen.values()].filter(p => (p.qty || 0) >= 1);
-  if (pool.length === 0) pool = [...seen.values()];
+  let pool = [...seen.values()].filter(p => (p.qty || 0) >= 1);  // STRICT: only in-stock
   pool = applyPriceSizeFilters(pool, { min_price, max_price });
   const available = pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20));
   stripInternals(available);
