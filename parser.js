@@ -30,17 +30,22 @@ const BRAND_ALIASES = {
 };
 
 const CATEGORY_HINTS = {
-  // v6.3.3: "paddle ball" / "paddleball" is PADEL ball, NOT a paddle (racquet).
-  // Balls MUST be checked before racquets so that "paddle ball" routes to balls.
-  balls:       /\b(ball|balls|tennis ball|padel ball|paddle ball|paddleball|pickleball)\b/i,
+  // v6.4.3: Category routing. The `balls` regex intentionally matches the bare
+  // word "pickleball" (because "pickleballs" IS the ball). That caused
+  // "pickleball bags" to match balls first and bags never won. Fix: check
+  // SPECIFIC accessory categories (bags, shoes, machine, strings, accessories)
+  // BEFORE `balls`. `balls` still precedes `racquets` so "paddle ball" routes
+  // to balls (v6.3.3 invariant, preserved).
+  bags:        /\b(bag|bags|backpack|kitbag|duffel|duffle)\b/i,
   shoes:       /\b(shoe|shoes|footwear|sneaker|sneakers|trainer)\b/i,
+  machine:     /\b(ball ?machine|ball ?thrower|ball ?launcher|ball ?cannon|ball ?feeder)\b/i,
+  strings:     /\b(string|strings|gut|polyester)\b/i,
+  accessories: /\b(accessor|grip tape|overgrip|dampener|wristband|headband|cap|sock)\b/i,
+  // v6.3.3 invariant: balls BEFORE racquets so "paddle ball" -> balls.
+  balls:       /\b(ball|balls|tennis ball|padel ball|paddle ball|paddleball|pickleball|pickleballs)\b/i,
   // Racquets: match racquet/racket and "paddle(s)" BUT NOT when followed by " ball"
   // (that's a ball query, handled above).
   racquets:    /\b(racquet|racquets|racket|rackets|paddles?(?!\s*ball\b))\b/i,
-  strings:     /\b(string|strings|gut|polyester)\b/i,
-  bags:        /\b(bag|bags|backpack|kitbag)\b/i,
-  accessories: /\b(accessor|grip tape|overgrip|dampener|wristband|headband|cap|sock)\b/i,
-  machine:     /\b(ball ?machine|ball ?thrower|ball ?launcher|ball ?cannon|ball ?feeder)\b/i,
   used:        /\b(used|second[- ]?hand|preowned|pre[- ]?owned)\b/i,
   sale:        /\b(sale|discount|offer|wimbledon|grand ?slam|boxing ?day|clearance)\b/i
 };
@@ -334,6 +339,19 @@ function slotsFromSpec(spec, existingSlots = {}) {
   const isNewQuery = !spec.is_follow_up && (spec.confidence || 0) >= 0.7;
 
   if (isNewQuery) {
+    // v6.4.3: Authoritative category from spec.intent. Previously the regex
+    // parser could mis-route "pickleball bags" to category='balls' (because
+    // the balls regex matched "pickleball"). Even after fixing the regex
+    // order, a stale session category can linger; spec.intent is the LLM's
+    // authoritative signal and must win on new queries.
+    const INTENT_TO_CATEGORY = {
+      racquet: 'racquets', shoe: 'shoes', ball: 'balls', string: 'strings',
+      bag: 'bags', overgrip: 'accessories', accessory: 'accessories',
+      ball_machine: 'machine'
+    };
+    if (spec.intent && INTENT_TO_CATEGORY[spec.intent]) {
+      out.category = INTENT_TO_CATEGORY[spec.intent];
+    }
     // Authoritative overwrite — spec wins for ALL fields, including nulls that clear old values
     if (spec.sport) out.sport = spec.sport;
     if (spec.brand) out.brand = spec.brand; else delete out.brand;
