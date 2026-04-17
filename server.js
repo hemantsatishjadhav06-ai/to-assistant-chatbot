@@ -225,6 +225,91 @@ const OAUTH_CONSUMER_SECRET = process.env.MAGENTO_CONSUMER_SECRET;
 const OAUTH_ACCESS_TOKEN = process.env.MAGENTO_ACCESS_TOKEN;
 const OAUTH_ACCESS_TOKEN_SECRET = process.env.MAGENTO_ACCESS_TOKEN_SECRET;
 
+// ==================== LAYER 1: SPORT DETECTION (v6.3.0) ====================
+// Sport-specific keyword map. Brand names are sport-distinctive for many brands
+// (Selkirk / Joola = pickleball; Bullpadel / Nox = padel; Babolat Pure Drive =
+// tennis, etc.) so querying by brand alone disambiguates the sport without the
+// customer having to say it. Any brand that is cross-sport (e.g. "Wilson" is sold
+// in all three) is intentionally omitted — it would poison disambiguation.
+const SPORT_KEYWORDS = {
+  tennis: [
+    // direct sport words
+    'tennis', 'atp', 'wta', 'grand slam', 'wimbledon', 'roland garros', 'us open',
+    // tennis-only brand/model signals
+    'pro staff', 'pure drive', 'pure aero', 'blade 98', 'head speed', 'head radical', 'head gravity',
+    'yonex ezone', 'yonex vcore', 'yonex percept', 'prince textreme', 'tecnifibre tfight',
+    'solinco', 'dunlop cx', 'dunlop fx', 'slazenger', 'penn championship', 'wilson triniti'
+  ],
+  pickleball: [
+    // direct sport words (cover common typos/variants)
+    'pickleball', 'pickle ball', 'pickle-ball', 'pickleballs', 'pickle', 'pickball',
+    'paddleball', 'paddle ball',
+    // pickleball-only brand/model signals
+    'selkirk', 'joola', 'paddletek', 'onix', 'gamma pickleball', 'engage',
+    'franklin x-40', 'franklin x40', 'dura fast 40', 'hyper ball',
+    'vatic pro', 'crbn', 'proxr', 'six zero', 'diadem pickleball'
+  ],
+  padel: [
+    // direct sport words (cover typos)
+    'padel', 'padle', 'padell', 'paddel',
+    // padel-only brand/model signals
+    'bullpadel', 'nox ', 'nox at', 'nox ml10', 'nox x-one',
+    'head padel', 'head delta', 'babolat padel', 'babolat technical',
+    'adidas padel', 'adidas adipower', 'wilson padel', 'star vie', 'starvie',
+    'siux', 'varlion', 'dunlop padel', 'asics padel'
+  ]
+};
+
+// v6.3.0: Central sport detector. Returns 'tennis'|'pickleball'|'padel' when the
+// sport is resolvable from either (a) the current query, or (b) any recent user
+// turn in the provided history. Returns null when ambiguous — the caller MUST
+// then invoke the clarification gate rather than guess.
+function detectSport(query, conversationHistory = []) {
+  const q = String(query || '').toLowerCase();
+  // Check current query first — most specific signal.
+  for (const [sport, keywords] of Object.entries(SPORT_KEYWORDS)) {
+    if (keywords.some(kw => q.includes(kw))) return sport;
+  }
+  // Sticky-context fallback: walk history newest→oldest so a sport mentioned on
+  // the previous turn still resolves follow-ups like "any under 500?".
+  if (Array.isArray(conversationHistory)) {
+    for (let i = conversationHistory.length - 1; i >= 0; i--) {
+      const m = conversationHistory[i];
+      if (!m || m.role !== 'user') continue;
+      const s = String(m.content || '').toLowerCase();
+      for (const [sport, keywords] of Object.entries(SPORT_KEYWORDS)) {
+        if (keywords.some(kw => s.includes(kw))) return sport;
+      }
+    }
+  }
+  return null;
+}
+
+// ==================== LAYER 3: SPORT COACHING NOTES (v6.3.0) ====================
+// Injected into the LLM's system message once a sport is resolved. Scopes the
+// "Coach" persona to that sport's product lore so the LLM never cross-contaminates
+// (e.g. never recommends a tennis ball for padel, never calls a pickleball felt).
+const SPORT_COACHING_NOTES = {
+  tennis: [
+    'Tennis balls are pressurized, felt-covered, ~65mm diameter, yellow.',
+    'Pressurized tournament balls (Wilson US Open, Head Championship, Dunlop Fort) for matches; pressureless (Tretorn Micro X) for practice/ball-machines.',
+    'A tennis ball is NOT a padel ball (padel is lower-pressure) and NOT a pickleball (pickleball is perforated plastic).',
+    'Tennis shoes have reinforced toes and lateral support for baseline sliding on hard/clay courts.'
+  ].join(' '),
+  pickleball: [
+    'Pickleballs are PERFORATED PLASTIC (not felt), ~74mm, with an indoor variant (smaller holes, softer) and outdoor variant (larger holes, harder).',
+    'USAPA-approved standards include Franklin X-40 (outdoor), Dura Fast 40 (outdoor), Onix Fuse, Joola Primo.',
+    'A tennis ball or padel ball is NOT a pickleball substitute — different sport, different physics.',
+    'Pickleball shoes prioritize lateral quickness and court feel; they are lighter than full tennis shoes.'
+  ].join(' '),
+  padel: [
+    'Padel balls look like tennis balls but have SLIGHTLY LOWER pressure (lower bounce) per FIP regulations.',
+    'Key padel ball brands: Head Padel Pro, Bullpadel Next, Wilson Padel, Babolat Padel Team, Adidas Padel.',
+    'Never recommend a standard tennis ball for padel — it bounces too high for the glass-walled court game.',
+    'Padel shoes have a herringbone / clay-court style tread for artificial grass + sand courts.'
+  ].join(' ')
+};
+
 // ==================== SYSTEM PROMPT ====================
 const SYSTEM_PROMPT = `You are "TO Assistant" - the official Customer Support Assistant for Pro Sports Outlets, India's trusted online stores for racquet sports:
 - Tennis: TennisOutlet.in (https://tennisoutlet.in)
@@ -292,6 +377,14 @@ SPORT CLARIFICATION (v6.2.1 — ALWAYS CHECK FIRST):
 - Before calling any product tool, confirm which SPORT the customer is shopping for: tennis, pickleball, or padel.
 - If the query is a generic "shoes", "balls", "racquet", "racket", or "paddle" WITHOUT naming a sport AND no sport was mentioned earlier in the conversation: DO NOT call any tool. Instead reply with: "Happy to help you find the right [shoes/balls/racquet or paddle]! Which sport are you shopping for — tennis, pickleball, or padel? Once you tell me, I'll pull the in-stock options for that sport." Then wait for the customer to answer.
 - Once the customer names a sport (or if the sport is clear from earlier in the conversation), proceed with the appropriate tool and pass sport=<their answer>.
+
+CROSS-SPORT HARD RULES (v6.3.0 — NEVER VIOLATE):
+- Every product returned by tools now carries a "sport" field (tennis / pickleball / padel). This is AUTHORITATIVE and derived from the product's own Magento categories.
+- When the conversation is locked to a sport (either the customer named it, or a coaching directive system message specifies SPORT SCOPE), you MUST ONLY recommend products whose sport matches that locked sport. Drop any product whose sport differs — do not mention it, do not link it, do not justify it.
+- NEVER suggest a tennis ball for padel play, a tennis ball for pickleball play, a pickleball for tennis, or vice-versa. These are different balls with different physics (tennis = pressurized felt, pickleball = perforated plastic, padel = lower-pressure felt).
+- NEVER suggest tennis shoes for pickleball or padel play, or vice-versa, once the sport is locked.
+- If a product's "sport" field disagrees with the conversation's locked sport, treat it as a retrieval miss — tell the customer the in-stock list for their sport is empty or slim, and offer to widen the search. Do NOT silently substitute the wrong-sport item.
+- Product names, prices, and product_url MUST be copied verbatim from the tool response. NEVER invent, guess, or reconstruct a URL/SKU/price.
 
 ROUTING RULES (STRICT - follow these exactly):
 - ANY query about RACQUETS / RACKETS / PADDLES (tennis racquet, padel racket, pickleball paddle, paddleball paddle, brand-specific) -> MUST call get_racquets_with_specs with the correct sport (tennis/padel/pickleball). If the customer didn't specify a sport and none is in conversation history, ASK FIRST (see SPORT CLARIFICATION above). NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434).
@@ -1008,7 +1101,11 @@ function shapeProduct(item, qty, sport = 'tennis') {
     product_url: buildProductUrl(item, resolvedSport),
     image: attrs.image ? `${getStoreUrl(resolvedSport)}/media/catalog/product${attrs.image}` : null,
     qty,
-    magento_in_stock: magentoStockItem ? !!magentoStockItem.is_in_stock : null
+    magento_in_stock: magentoStockItem ? !!magentoStockItem.is_in_stock : null,
+    // v6.3.0 LAYER 2: stamp sport on every shaped product so the LLM (and any
+    // downstream deduper) can verify the returned list never mixes sports.
+    // detectSportFromProduct uses the product's own categories — authoritative.
+    sport: resolvedSport
   };
   // Shoe-specific specs, resolved where possible
   const shoeSpecs = {};
@@ -2092,29 +2189,20 @@ app.post('/api/chat', async (req, res) => {
     // Multi-agent pre-processor: classify intent BEFORE sending to LLM.
     const classification = classifyIntent(lastUser);
 
-    // v6.2.1: Look across the last few user turns for a sport keyword. This catches
-    // multi-turn flows like "show me balls" → (bot asks) → "tennis" — we need to
-    // connect the sport reply to the earlier generic query.
-    const recentUserText = messages
-      .filter(m => m && m.role === 'user')
-      .slice(-4)
-      .map(m => String(m.content || ''))
-      .join(' ');
-    const recentLower = recentUserText.toLowerCase();
-    const sportInRecent = /\bpadel\b/i.test(recentLower) ? 'padel' :
-                          /pickleball|pickle\b|paddleball|paddle\s*ball/i.test(recentLower) ? 'pickleball' :
-                          /\btennis\b/i.test(recentLower) ? 'tennis' : null;
+    // v6.3.0: LAYER 1 — single authoritative sport detector. Pulls sport from the
+    // current query (incl. brand signals like "Bullpadel", "Selkirk", "Pro Staff")
+    // and falls back to the most recent user turn that mentions a sport. Replaces
+    // the previous scattered mentionsPickle / mentionsPadel / sportInRecent trio.
+    const detectedSportForTurn = detectSport(lastUser, messages.filter(m => m && m.role === 'user'));
 
-    // v6.1.5 + v6.2.1: SPORT INJECTION — when intent is 'shoe'/'ball'/'racquet' (or any
-    // tool that takes sport), pull sport from current message first, then from recent
-    // history. This ensures "padel shoes" → sport='padel', and "balls"→"tennis" on the
-    // next turn → sport='tennis'.
+    // v6.1.5 + v6.2.1 + v6.3.0: SPORT INJECTION — inject the detected sport into
+    // the tool hintArgs so deterministic routing (not the LLM's guess) picks the
+    // right store. If detectSport returns null we fall through to the clarification
+    // gate below.
     if (classification.top && classification.top.force) {
       if (!classification.top.hintArgs) classification.top.hintArgs = {};
-      if (!classification.top.hintArgs.sport) {
-        if (mentionsPadel) classification.top.hintArgs.sport = 'padel';
-        else if (mentionsPickle) classification.top.hintArgs.sport = 'pickleball';
-        else if (sportInRecent) classification.top.hintArgs.sport = sportInRecent;
+      if (!classification.top.hintArgs.sport && detectedSportForTurn) {
+        classification.top.hintArgs.sport = detectedSportForTurn;
       }
     }
 
@@ -2161,9 +2249,25 @@ app.post('/api/chat', async (req, res) => {
     if (classification.top && classification.top.force && !forceToolChoice?.function) {
       forceToolChoice = { type: 'function', function: { name: classification.top.force } };
     }
+    // v6.3.0: LAYER 3 — inject sport-specific "Coach" notes when sport is resolved.
+    // Also add a hard cross-sport rule so the LLM cannot recommend off-sport products
+    // even if something slips through the retrieval filter.
+    const coachingDirective = detectedSportForTurn && SPORT_COACHING_NOTES[detectedSportForTurn] ? {
+      role: 'system',
+      content:
+        `SPORT SCOPE FOR THIS CONVERSATION: ${detectedSportForTurn.toUpperCase()}.\n` +
+        `You are answering as a ${detectedSportForTurn} coach. HARD RULES:\n` +
+        `1) Only recommend products returned by the tool calls in this turn. Do not invent products, SKUs, prices, or URLs.\n` +
+        `2) Do NOT reference tennis/pickleball/padel gear other than ${detectedSportForTurn}. If retrieval returns a product stamped with a different sport, ignore it.\n` +
+        `3) Every product you mention MUST use the exact name, price, and product_url from the tool result, verbatim.\n` +
+        `4) If the retrieved list is empty or does not match the user's ask, say so honestly and offer the closest in-stock option — do not pretend.\n` +
+        `COACHING CONTEXT: ${SPORT_COACHING_NOTES[detectedSportForTurn]}`
+    } : null;
+
     const systemParts = [{ role: 'system', content: SYSTEM_PROMPT }];
     if (sizeDirective) systemParts.push(sizeDirective);
     if (agentHint) systemParts.push(agentHint);
+    if (coachingDirective) systemParts.push(coachingDirective);
     const apiMessages = [...systemParts, ...messages];
 
     let response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
@@ -2389,14 +2493,15 @@ app.post('/api/chat-agents', async (req, res) => {
         merged.category === 'balls'
       );
     if (needsSportClarification) {
-      const recentAgentsText = [
-        ...serverHistory.filter(m => m && m.role === 'user').slice(-4).map(m => String(m.content || '')),
-        lastUser
-      ].join(' ').toLowerCase();
-      const sportInAgentsHistory =
-        /\bpadel\b/i.test(recentAgentsText) ? 'padel' :
-        /pickleball|pickle\b|paddleball|paddle\s*ball/i.test(recentAgentsText) ? 'pickleball' :
-        /\btennis\b/i.test(recentAgentsText) ? 'tennis' : null;
+      // v6.3.0: Use centralized detectSport() with brand-aware keywords. Feed it
+      // both the current turn and recent user history so sticky sport context
+      // (e.g. "show me pickleball paddles" → two turns later "any new shoes?")
+      // resolves via conversation continuity + brand signals, not raw regex.
+      const agentsHistoryForDetect = [
+        ...serverHistory.filter(m => m && m.role === 'user'),
+        { role: 'user', content: lastUser }
+      ];
+      const sportInAgentsHistory = detectSport(lastUser, agentsHistoryForDetect);
       if (sportInAgentsHistory) {
         // Backfill sport from recent history so downstream tools get the right store.
         merged.sport = sportInAgentsHistory;
@@ -2445,9 +2550,27 @@ app.post('/api/chat-agents', async (req, res) => {
     if (merged.min_price != null) specBits.push(`min_price=${merged.min_price}`);
     if (merged.max_price != null) specBits.push(`max_price=${merged.max_price}`);
     if (merged._page_size) specBits.push(`page_size=${merged._page_size}`);
-    const enrichedSessionHint = specBits.length
+    let enrichedSessionHint = specBits.length
       ? `${sessionHint || ''} [NORMALIZED SPEC ÃÂ¢ÃÂÃÂ USE THESE VALUES VERBATIM] ${specBits.join(', ')}`
       : sessionHint;
+
+    // v6.3.0: LAYER 3 COACHING DIRECTIVE for /api/chat-agents pipeline.
+    // Append per-sport coaching rules + hard cross-sport guardrails so the
+    // master handler / LLM stays locked to the detected sport. These rules are
+    // additive to the normalized-spec hint and are consumed by masterHandle's
+    // sessionHint parameter (which it forwards into the LLM system prompt).
+    const agentsCoachSport = merged.sport || null;
+    if (agentsCoachSport && SPORT_COACHING_NOTES[agentsCoachSport]) {
+      const coachBlock =
+        ` [SPORT SCOPE: ${agentsCoachSport.toUpperCase()}] ` +
+        `You are answering as a ${agentsCoachSport} coach. HARD RULES: ` +
+        `(1) Only recommend products returned by the tool calls in this turn - do not invent SKUs, prices, or URLs. ` +
+        `(2) Do NOT reference tennis/pickleball/padel gear other than ${agentsCoachSport}. If a product is stamped with a different sport, ignore it. ` +
+        `(3) Every product you mention MUST use the exact name, price, and product_url from the tool result. ` +
+        `(4) If the retrieved list is empty or off-target, say so honestly and offer the closest in-stock option. ` +
+        `COACHING CONTEXT: ${SPORT_COACHING_NOTES[agentsCoachSport]}`;
+      enrichedSessionHint = (enrichedSessionHint || '') + coachBlock;
+    }
 
     // v5.7.0: NO deadline ÃÂ¢ÃÂÃÂ let the pipeline complete naturally.
     // Correctness > speed. The LLM + Magento will take as long as they need.
