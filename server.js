@@ -1391,12 +1391,17 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
     const shaped = result.items.map(item => {
-      // v6.2.0: TRUST REAL STOCK ONLY. We do NOT bump qty to 1 here based on
-      // is_in_stock — enrichConfigurables below will set qty to the sum of real
-      // child stock. A shoe whose children are all OOS must be dropped, not faked.
+      // v6.3.4: Tag shoes so enrichConfigurables can apply the MSI-empty
+      // compensation scoped to shoes only (racquets untouched — they have
+      // real MSI data). Verified 2026-04-17 via admin screenshots + stock-debug:
+      // merchant enabled + published shoes (visibility=4, status=1) but never
+      // populated inventory_source_items — so child qty comes back 0 for all.
+      // Racquet children have real MSI rows, so they keep strict qty gating.
       const qty = stockMap[item.sku] || 0;
       const itemSport = _sportForSku[item.sku] || sport;
-      return shapeProduct(item, qty, itemSport);
+      const p = shapeProduct(item, qty, itemSport);
+      p._is_shoe = true;  // v6.3.4 flag — only shoes enter the trust-visibility branch
+      return p;
     });
 
     // Enrich configurables to get child prices (CAP=15)
@@ -1651,7 +1656,18 @@ async function enrichConfigurables(products, forceAll = true) {
         const childSkus = children.map(c => c.sku);
         stockMap = await fetchStockMap(childSkus);
         const total = Object.values(stockMap).reduce((a, b) => a + (parseFloat(b) || 0), 0);
-        p.qty = total;  // ALWAYS set: 0 means all children are OOS
+        // v6.3.4: SHOE MSI COMPENSATION
+        // When MSI returns 0 for every child but children DID load with real
+        // price data, trust Magento's status=1 + visibility=4 as the stock
+        // signal. Scoped to shoes via p._is_shoe (set in getShoesWithSpecs).
+        // Racquets never enter this branch — they keep strict qty = total,
+        // so a genuinely sold-out racquet still drops at the isProductAvailable gate.
+        if (total === 0 && p._is_shoe && children.length > 0) {
+          p.qty = 1;
+          p._stock_via_visibility = true;
+        } else {
+          p.qty = total;  // ALWAYS set: 0 means all children are OOS
+        }
       } catch { /* keep parent qty from fetchStockMap */ }
       p._children_loaded = true;  // Flag: children were successfully fetched
       // Per-child detail for size / price filtering
