@@ -2195,9 +2195,36 @@ async function smartProductSearch({ query, sport = 'tennis', min_price = null, m
     }
   }
 
-  // Sort by qty desc (in-stock first), then by price
-  merged.sort((a, b) => (b.qty || 0) - (a.qty || 0) || (a.price || 99999) - (b.price || 99999));
-  const final = merged.slice(0, Math.min(page_size, 20));
+  // v6.4.2: Sport-scope filter. When the query/session established a sport
+  // (pickleball/padel/tennis), drop cross-sport products that the keyword
+  // search union pulled in via generic tokens (e.g. %bag%, %shoe%). Every
+  // shaped product carries `sport` from detectSportFromProduct(categories);
+  // that is the authoritative signal — not the query text. Fixes the
+  // "pickleball bags → tennis bags surface instead" class of bug: a tennis
+  // bag with qty=30 no longer outranks a pickleball Engage bag with qty=5.
+  // Fallback: if no product matches the requested sport, keep the full list
+  // so downstream narrative can still honestly say "no X-sport products,
+  // here's closest match" instead of going empty.
+  const KNOWN_SPORT_SET = new Set(['tennis', 'pickleball', 'padel']);
+  let scoped = merged;
+  if (sport && KNOWN_SPORT_SET.has(sport)) {
+    const inSport = merged.filter(p => p && p.sport === sport);
+    if (inSport.length > 0) scoped = inSport;
+  }
+
+  // v6.4.2: In-stock first (hard priority), then qty desc, then price asc.
+  // The previous sort was qty-only, which pushed OOS=0 products to the end
+  // only incidentally and did nothing to guarantee in-stock-first ordering
+  // across a mixed pool. isProductAvailable handles configurables correctly.
+  scoped.sort((a, b) => {
+    const aIn = ((a.qty || 0) >= 1 && isProductAvailable(a)) ? 1 : 0;
+    const bIn = ((b.qty || 0) >= 1 && isProductAvailable(b)) ? 1 : 0;
+    if (aIn !== bIn) return bIn - aIn;
+    const dq = (b.qty || 0) - (a.qty || 0);
+    if (dq !== 0) return dq;
+    return (a.price || 99999) - (b.price || 99999);
+  });
+  const final = scoped.slice(0, Math.min(page_size, 20));
 
   return {
     products: final,
