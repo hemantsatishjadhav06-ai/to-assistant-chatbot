@@ -288,11 +288,16 @@ TERMINOLOGY MAP (CRITICAL - always apply BEFORE routing):
 - If the customer uses ambiguous term "paddle": assume PICKLEBALL PADDLE unless they explicitly say "padel". If "racket" without sport, assume TENNIS.
 - If a query mentions ANY product that exists in our catalog (tennis, pickleball, padel, ball machine, shoes, strings, bags, accessories), you MUST call the appropriate Magento tool. NEVER reply "we don't have that" or "I can't fetch" without first trying search_products as a fallback.
 
+SPORT CLARIFICATION (v6.2.1 — ALWAYS CHECK FIRST):
+- Before calling any product tool, confirm which SPORT the customer is shopping for: tennis, pickleball, or padel.
+- If the query is a generic "shoes", "balls", "racquet", "racket", or "paddle" WITHOUT naming a sport AND no sport was mentioned earlier in the conversation: DO NOT call any tool. Instead reply with: "Happy to help you find the right [shoes/balls/racquet or paddle]! Which sport are you shopping for — tennis, pickleball, or padel? Once you tell me, I'll pull the in-stock options for that sport." Then wait for the customer to answer.
+- Once the customer names a sport (or if the sport is clear from earlier in the conversation), proceed with the appropriate tool and pass sport=<their answer>.
+
 ROUTING RULES (STRICT - follow these exactly):
-- ANY query about RACQUETS / RACKETS / PADDLES (tennis racquet, padel racket, pickleball paddle, paddleball paddle, brand-specific) -> MUST call get_racquets_with_specs with the correct sport (tennis/padel/pickleball). NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434).
-- ANY query about SHOES / FOOTWEAR -> MUST call get_shoes_with_specs (never get_products_by_category for shoes).
+- ANY query about RACQUETS / RACKETS / PADDLES (tennis racquet, padel racket, pickleball paddle, paddleball paddle, brand-specific) -> MUST call get_racquets_with_specs with the correct sport (tennis/padel/pickleball). If the customer didn't specify a sport and none is in conversation history, ASK FIRST (see SPORT CLARIFICATION above). NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434).
+- ANY query about SHOES / FOOTWEAR -> MUST call get_shoes_with_specs (never get_products_by_category for shoes). If the sport is not specified and not in history, ASK FIRST.
 - ANY query about BRANDS carried by the store -> call list_brands.
-- BALLS -> get_balls. Pass sport='tennis' for tennis balls, sport='pickleball' for pickleball balls, sport='padel' for padel balls. If the customer just says 'balls' (no sport), OMIT sport or pass sport='all' — the tool will merge tennis+pickleball+padel balls. Only products with real quantity >= 1 are returned. NEVER use get_products_by_category for balls.
+- BALLS -> get_balls. Pass sport='tennis' for tennis balls, sport='pickleball' for pickleball balls, sport='padel' for padel balls. If the customer just says 'balls' (no sport) AND no sport is in conversation history, ASK FIRST rather than calling the tool. Only products with real quantity >= 1 are returned. NEVER use get_products_by_category for balls.
 - STRINGS -> get_products_by_category (29).
 - BAGS -> get_products_by_category (115).
 - ACCESSORIES -> get_products_by_category (37).
@@ -1996,6 +2001,12 @@ const INTENT_RULES = [
   { intent: 'tennis_racquet',
     rx: [/tennis.*(racquet|racket)/i, /(racquet|racket).*tennis/i],
     force: 'get_racquets_with_specs', hintArgs: { sport: 'tennis' } },
+  // v6.2.1: Generic racquet/paddle intent — triggers ONLY when no sport word is present.
+  // Sport-specific rules above score higher when the user names a sport, so this stays as
+  // the fallback that fires the "which sport?" clarification gate in /api/chat.
+  { intent: 'racquet',
+    rx: [/\b(racquet|racquets|racket|rackets)\b/i, /\b(paddle|paddles)\b/i],
+    force: 'get_racquets_with_specs' },
   { intent: 'order_status',
     rx: [/order\s*(id|number|#)?\s*[:#]?\s*\d{3,}/i, /track.*order/i, /where.*order/i, /my\s+order/i],
     force: 'get_order_by_id' },
@@ -2081,15 +2092,61 @@ app.post('/api/chat', async (req, res) => {
     // Multi-agent pre-processor: classify intent BEFORE sending to LLM.
     const classification = classifyIntent(lastUser);
 
-    // v6.1.5: SPORT INJECTION — when intent is 'shoe' (or any tool that takes sport),
-    // detect sport from the user's message and inject it into hintArgs.
-    // This ensures "padel shoes" → sport='padel', "pickleball shoes" → sport='pickleball'.
+    // v6.2.1: Look across the last few user turns for a sport keyword. This catches
+    // multi-turn flows like "show me balls" → (bot asks) → "tennis" — we need to
+    // connect the sport reply to the earlier generic query.
+    const recentUserText = messages
+      .filter(m => m && m.role === 'user')
+      .slice(-4)
+      .map(m => String(m.content || ''))
+      .join(' ');
+    const recentLower = recentUserText.toLowerCase();
+    const sportInRecent = /\bpadel\b/i.test(recentLower) ? 'padel' :
+                          /pickleball|pickle\b|paddleball|paddle\s*ball/i.test(recentLower) ? 'pickleball' :
+                          /\btennis\b/i.test(recentLower) ? 'tennis' : null;
+
+    // v6.1.5 + v6.2.1: SPORT INJECTION — when intent is 'shoe'/'ball'/'racquet' (or any
+    // tool that takes sport), pull sport from current message first, then from recent
+    // history. This ensures "padel shoes" → sport='padel', and "balls"→"tennis" on the
+    // next turn → sport='tennis'.
     if (classification.top && classification.top.force) {
       if (!classification.top.hintArgs) classification.top.hintArgs = {};
       if (!classification.top.hintArgs.sport) {
         if (mentionsPadel) classification.top.hintArgs.sport = 'padel';
         else if (mentionsPickle) classification.top.hintArgs.sport = 'pickleball';
+        else if (sportInRecent) classification.top.hintArgs.sport = sportInRecent;
       }
+    }
+
+    // v6.2.1: SPORT CLARIFICATION GATE — if the query is a generic shoe/ball/racquet
+    // request with no sport anywhere in recent context, don't guess. Ask first. This
+    // prevents the bot from dumping the wrong sport's catalogue or defaulting to tennis
+    // when the customer meant pickleball/padel.
+    const AMBIGUOUS_GENERIC_INTENTS = new Set(['shoe', 'ball', 'racquet']);
+    if (
+      classification.top &&
+      AMBIGUOUS_GENERIC_INTENTS.has(classification.top.intent) &&
+      !classification.top.hintArgs?.sport
+    ) {
+      const nounMap = { shoe: 'shoes', ball: 'balls', racquet: 'racquet or paddle' };
+      const noun = nounMap[classification.top.intent] || classification.top.intent;
+      const clarifyingReply =
+        `Happy to help you find the right ${noun}! Which sport are you shopping for — ` +
+        `tennis, pickleball, or padel? Once you tell me, I'll pull the in-stock options ` +
+        `for that sport.`;
+      pushTrace({
+        user: lastUser,
+        intent: classification.top.intent,
+        entities: classification.entities || {},
+        forced: null,
+        iterations: 0,
+        action: 'sport_clarification'
+      });
+      return res.json({
+        message: clarifyingReply,
+        intent: classification.top.intent,
+        action: 'sport_clarification'
+      });
     }
 
     const agentHint = classification.top ? {
@@ -2316,6 +2373,61 @@ app.post('/api/chat-agents', async (req, res) => {
     }
 
     console.log(`[session:${sessionId}] turn=${turns} history=${serverHistory.length}msgs slots={${merged._rendered}}`);
+
+    // v6.2.1: SPORT CLARIFICATION GATE (multi-agent endpoint).
+    // If the user asks a generic shoe/ball/racquet query without naming a sport, scan the
+    // recent conversation for a sport word. If none is found anywhere, short-circuit with
+    // a clarifying question instead of guessing (or defaulting to tennis). This must run
+    // AFTER follow-up detection — follow-ups like "more please" inherit the session's
+    // prior intent and sport, so they should not trigger the gate.
+    const needsSportClarification =
+      !isFollowUpDetected &&
+      !merged.sport &&
+      (
+        merged.intent_hint === 'shoe' ||
+        merged.intent_hint === 'racquet' ||
+        merged.category === 'balls'
+      );
+    if (needsSportClarification) {
+      const recentAgentsText = [
+        ...serverHistory.filter(m => m && m.role === 'user').slice(-4).map(m => String(m.content || '')),
+        lastUser
+      ].join(' ').toLowerCase();
+      const sportInAgentsHistory =
+        /\bpadel\b/i.test(recentAgentsText) ? 'padel' :
+        /pickleball|pickle\b|paddleball|paddle\s*ball/i.test(recentAgentsText) ? 'pickleball' :
+        /\btennis\b/i.test(recentAgentsText) ? 'tennis' : null;
+      if (sportInAgentsHistory) {
+        // Backfill sport from recent history so downstream tools get the right store.
+        merged.sport = sportInAgentsHistory;
+        merged._rendered = slotParser.renderSlotsHint(merged);
+        sessionStore.update(sessionId, { slots: merged });
+        console.log(`[session:${sessionId}] sport backfilled from recent history: ${sportInAgentsHistory}`);
+      } else {
+        const nounForCategory =
+          merged.intent_hint === 'shoe' ? 'shoes' :
+          merged.intent_hint === 'racquet' ? 'racquet or paddle' :
+          'balls';
+        const clarifyingReply =
+          `Happy to help you find the right ${nounForCategory}! Which sport are you shopping ` +
+          `for — tennis, pickleball, or padel? Once you tell me, I'll pull the in-stock options ` +
+          `for that sport.`;
+        sessionStore.addMessage(sessionId, 'assistant', clarifyingReply);
+        console.log(`[session:${sessionId}] sport clarification short-circuit (intent_hint=${merged.intent_hint}, category=${merged.category})`);
+        return res.json({
+          message: clarifyingReply,
+          session_id: sessionId,
+          slots: merged,
+          action: 'sport_clarification',
+          _normalizer: {
+            ok: normResult.ok,
+            latency_ms: normResult.latency_ms,
+            error: normResult.error || null,
+            spec: normResult.spec || null
+          }
+        });
+      }
+    }
 
     // Bind sport to executeFunction so all tool calls get the right store URL
     const detectedSport = merged.sport || 'tennis';
