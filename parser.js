@@ -30,9 +30,13 @@ const BRAND_ALIASES = {
 };
 
 const CATEGORY_HINTS = {
+  // v6.3.3: "paddle ball" / "paddleball" is PADEL ball, NOT a paddle (racquet).
+  // Balls MUST be checked before racquets so that "paddle ball" routes to balls.
+  balls:       /\b(ball|balls|tennis ball|padel ball|paddle ball|paddleball|pickleball)\b/i,
   shoes:       /\b(shoe|shoes|footwear|sneaker|sneakers|trainer)\b/i,
-  racquets:    /\b(racquet|racquets|racket|rackets|paddle|paddles)\b/i,
-  balls:       /\b(ball|balls|tennis ball|padel ball|pickleball)\b/i,
+  // Racquets: match racquet/racket and "paddle(s)" BUT NOT when followed by " ball"
+  // (that's a ball query, handled above).
+  racquets:    /\b(racquet|racquets|racket|rackets|paddles?(?!\s*ball\b))\b/i,
   strings:     /\b(string|strings|gut|polyester)\b/i,
   bags:        /\b(bag|bags|backpack|kitbag)\b/i,
   accessories: /\b(accessor|grip tape|overgrip|dampener|wristband|headband|cap|sock)\b/i,
@@ -43,8 +47,10 @@ const CATEGORY_HINTS = {
 
 const SPORTS = {
   tennis:     /\btennis\b/i,
-  pickleball: /\bpickle ?ball\b/i,
-  padel:      /\bpadel\b/i
+  // Check padel BEFORE pickleball so "padel" doesn't ever match pickleball regex.
+  // v6.3.3: "paddle ball" / "paddleball" is a common India-English alias for padel ball.
+  padel:      /\b(padel|paddle\s?ball|paddleball|paddle\s+racket|paddle\s+racquet)\b/i,
+  pickleball: /\bpickle ?ball\b/i
 };
 
 const SKILL_LEVELS = {

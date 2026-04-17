@@ -72,7 +72,13 @@ Intents:
 - "greeting"     -> pure greeting with no question
 - "other"        -> out of scope
 
-Default sport = "tennis" unless pickleball/padel is clearly mentioned.`;
+Default sport = "tennis" unless pickleball/padel is clearly mentioned.
+
+SPORT DISAMBIGUATION (CRITICAL):
+- "paddle ball" / "paddleball" / "paddel ball" = PADEL BALL (sport: "padel", intent: "catalog"). Indian customers often spell "padel" as "paddle". A padel ball is NOT a pickleball.
+- "pickle ball" / "pickleball" (as a noun referring to the ball) = sport: "pickleball".
+- "tennis ball" = sport: "tennis".
+- "paddle" alone (as a racquet) = pickleball unless padel context is clear.`;
 
 async function routeIntent(userText, conversationHistory = []) {
   try {
@@ -189,8 +195,9 @@ ${COMMON_RULES}`,
 - BALLS - CRITICAL SPORT LOCK: tennis balls, pickleball balls and padel balls are DIFFERENT products. Detect the sport from the customer's query and use the matching category:
     * Tennis ball / tennis balls → get_products_by_category({category_id:31})
     * Pickleball / pickle ball / pickleballs → get_products_by_category({category_id:252})
-    * Padel ball / padel balls → get_products_by_category({category_id:273})
-  NEVER show tennis balls for a pickleball query. NEVER show pickleballs for a tennis query. A tennis ball is pressurized felt (65mm). A pickleball is PERFORATED PLASTIC. A padel ball is tennis-shaped but lower pressure. They are NOT interchangeable.
+    * Padel ball / padel balls / paddle ball / paddleball / paddel ball → get_products_by_category({category_id:273})
+  "paddle ball" / "paddleball" is the Indian-English phonetic spelling of "padel ball" — it is PADEL, never pickleball.
+  NEVER show tennis balls for a pickleball query. NEVER show pickleballs for a tennis or padel query. A tennis ball is pressurized felt (65mm). A pickleball is PERFORATED PLASTIC. A padel ball is tennis-shaped but lower pressure. They are NOT interchangeable.
 - For strings, bags, accessories, clothing: use smart_product_search with the customer's keywords.
 - Use get_products_by_category when you know the exact category ID.
 - Category IDs: Tennis Balls=31, Pickleball Balls=252, Padel Balls=273, Strings=29, Bags=115, Accessories=37, Used Racquets=90, Clothing=36, Wimbledon Sale=292, Grand Slam=349, Boxing Day=437.

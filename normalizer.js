@@ -40,6 +40,8 @@ INTERPRETATION RULES (CRITICAL):
 1. "bat" = racquet. Tennis players commonly call racquets "bats" (especially Indian customers).
 2. "racket" = racquet (same thing, spelling variant).
 3. "paddle" = pickleball paddle if pickleball context, padel racket if padel context, else ambiguous -> racquet.
+3a. CRITICAL: "paddle ball" / "paddleball" / "paddel ball" = PADEL BALL (intent: "catalog", sport: "padel", normalized_query: "padel balls"). It is NOT pickleball and NOT a paddle/racquet. Indian English uses "paddle" as a phonetic spelling for "padel".
+3b. Ball routing: "tennis ball" -> sport:tennis. "pickle ball"/"pickleball" -> sport:pickleball. "padel ball"/"paddle ball"/"paddleball" -> sport:padel.
 4. "shoe", "footwear", "sneaker", "trainer", "sports shoe" = shoe intent.
 5. Currency: "5K" = 5000, "20K" = 20000, "1L" / "1 lakh" = 100000. "20K to 30K" means min_price:20000, max_price:30000.
 6. Playing style words map like this:
