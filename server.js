@@ -406,14 +406,18 @@ SMART GUIDELINES:
 - Cross-sell: racquet -> suggest strings/bags/shoes.
 - When recommending new racquets, mention the Racquet Upgrade Program (https://tennisoutlet.in/racquet-upgrade-program) ÃÂ¢ÃÂÃÂ customers can trade in their old racquet.
 
-SIZE / SIZE-SPECIFIC REQUESTS (IMPORTANT):
-- Shoe sizes (UK/US/EU) and apparel sizes are VARIANTS selected on each product page ÃÂ¢ÃÂÃÂ they are NOT separate products and NOT in product names.
-- NEVER tell the customer "we don't have size X" or "no shoes in size X". Sizes are available on each product page.
-- For shoe queries WITH a size: call get_shoes_with_specs with the size parameter. The tool will try to find exact size matches, and if none, will automatically fall back to showing all available shoes with a note about size selection.
-- For shoe queries WITHOUT a size: call get_shoes_with_specs normally, show 4-5 products.
-- ALWAYS show shoes with clickable links. After the list, add: "All sizes (including size X) can be selected on each product page. If a specific size is sold out, it will be marked on that page."
-- If the customer says "sports shoes" or just "shoes" without specifying tennis/pickleball/padel, pass sport="all" to get_shoes_with_specs to search across all stores.
-- Same rule for grip size on racquets, apparel sizes (S/M/L/XL), string tension, etc. ÃÂ¢ÃÂÃÂ show the category, tell the user where to pick the variant on the product page.
+SIZE / SIZE-SPECIFIC REQUESTS (CRITICAL - READ CAREFULLY):
+- Shoe size is encoded as the LAST NUMBER in the product name (e.g. "Asics Gel Resolution 9 - 10" = size 10; "Nike Vapor Pro 11.5" = size 11.5). Every shoe product name ends with its size.
+- When a customer asks for shoes in size X: call get_shoes_with_specs with the customer's sport (tennis / pickleball / padel) AND size=X. NEVER pass sport="all" unless the customer explicitly asked for all sports.
+- After the tool returns, YOU must filter the products list: read the LAST NUMBER in each product name and only present the shoes whose trailing number equals the requested size.
+- If one or more products match size X: present those products only, with their clickable links, and a short note: "Here are the size X shoes we have in stock."
+- If NO products in the returned list match size X: tell the customer PLAINLY: "We don't have size X [sport] shoes in stock right now." Then look at the trailing numbers in the returned product names, pick the 2-3 closest available sizes, and offer them by name ("We do have these in size 9 and size 10: <product A>, <product B>").
+- NEVER say "check size availability on the product page". NEVER say "you can select size on each product page". NEVER tell the customer to go hunt for their size on the website - that is the whole reason they are chatting with you.
+- NEVER mix sports. If the customer asked for tennis shoes, do not show padel or pickleball shoes, even if the padel/pickleball shoes happen to be in the requested size.
+- The tool response includes a "customer_query" object that echoes what you asked for - use it to stay grounded on sport and size.
+- For shoe queries WITHOUT a size: call get_shoes_with_specs normally, show 4-5 products, and you do NOT need to filter by size.
+- If the customer says "sports shoes" or just "shoes" without specifying tennis/pickleball/padel, ONLY THEN pass sport="all".
+- Same size-from-name logic applies to apparel sizes (S/M/L/XL) and racquet grip sizes when present in product names.
 
 PAYMENT:
 - Cards, Net Banking, UPI, EMI, COD. EMI: "coming within a week".
@@ -1307,9 +1311,11 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     // The LLM reads the last number in child product names to determine sizes.
     // This avoids all Magento API limitations with child products & categories.
 
-    // When size is requested, ALWAYS search all 3 categories so we find all shoes
+    // v6.3.1: RESPECT THE SPORT LOCK. Only search across categories when sport
+    // is explicitly 'all'. A tennis query must only hit the tennis category —
+    // even when a size is requested — or we cross-pollute with padel/pickleball.
     const sportKey = String(sport || 'tennis').toLowerCase();
-    const searchAllCats = !!size || sportKey === 'all';
+    const searchAllCats = sportKey === 'all';
 
     // v6.1.5: When fetching ALL categories, fetch each SEPARATELY so we can
     // tag each product with the correct sport for URL generation.
@@ -1478,14 +1484,27 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     }
 
     if (size && available.length > 0) {
-      message = `Showing ${available.length} shoes from all stores (qty >= 1). SIZE NOTE: Customer asked for size ${size}. Check each product name - the last number after "-" is the size (e.g. name ending in "-10" = size 10). Also check "sizes_in_stock" array if present. If sizes_in_stock is missing, tell customer to check size on product page.`;
+      message = `LLM INSTRUCTION: Customer asked for ${sport} shoes in size ${size}. The size of each shoe is the LAST NUMBER in its product name (e.g. "Asics Gel Resolution 9 - 10" = size 10, "Nike Court Vapor 11.5" = size 11.5). Read each product name, identify the trailing size number, and show ONLY the shoes that match size ${size}. If no products in this list match size ${size} exactly, tell the customer plainly: "We don't have size ${size} in ${sport} shoes right now" and then offer the 2-3 closest available sizes from THIS list by name. Do NOT tell the customer to check on the product page. Do NOT mix in shoes from other sports.`;
     } else if (!message) {
       message = available.length > 0
-        ? `Showing ${available.length} shoes with qty >= 1.`
-        : `No shoes with stock found matching those filters.`;
+        ? `Showing ${available.length} ${searchAllCats ? '' : sport + ' '}shoes with qty >= 1.`
+        : `No ${searchAllCats ? '' : sport + ' '}shoes with stock found matching those filters.`;
     }
 
     return {
+      // v6.3.1: Echo the customer's resolved query so the LLM has full context
+      // when presenting results. This is the source of truth for what was asked.
+      customer_query: {
+        sport: searchAllCats ? 'all' : sport,
+        size: size || null,
+        brand: brand || null,
+        shoe_type: shoe_type || null,
+        court_type: court_type || null,
+        width: width || null,
+        cushioning: cushioning || null,
+        min_price: min_price || null,
+        max_price: max_price || null
+      },
       sport: searchAllCats ? 'all' : sport,
       filters_applied: { brand, shoe_type, court_type, width, cushioning, size, min_price, max_price },
       products: available,
