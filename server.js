@@ -1384,24 +1384,18 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       return { products: [], total: 0, message: `No ${sport} shoes found.` };
     }
 
-    // v6.1.3: SAME PIPELINE AS OTHER CATEGORIES — fetch, shape, enrich, filter
-    // But for shoes (all configurables), Magento MSI returns qty=0 for both parents
-    // AND children — so we TRUST visibility=4 + status=enabled as the stock signal.
-    // If Magento shows the product on the storefront, it's available for purchase.
+    // v6.3.5: STRICT QTY — shoes follow the same honesty rule as racquets.
+    // Never fake stock: if MSI + /stockItems fallback both return 0 for a
+    // parent's children, the shoe is OOS and will be dropped at the qty>=1
+    // gate below. This reverts the v6.3.4 visibility compensation which was
+    // producing false positives (product page showed OOS while we were
+    // returning them as available).
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
     const shaped = result.items.map(item => {
-      // v6.3.4: Tag shoes so enrichConfigurables can apply the MSI-empty
-      // compensation scoped to shoes only (racquets untouched — they have
-      // real MSI data). Verified 2026-04-17 via admin screenshots + stock-debug:
-      // merchant enabled + published shoes (visibility=4, status=1) but never
-      // populated inventory_source_items — so child qty comes back 0 for all.
-      // Racquet children have real MSI rows, so they keep strict qty gating.
       const qty = stockMap[item.sku] || 0;
       const itemSport = _sportForSku[item.sku] || sport;
-      const p = shapeProduct(item, qty, itemSport);
-      p._is_shoe = true;  // v6.3.4 flag — only shoes enter the trust-visibility branch
-      return p;
+      return shapeProduct(item, qty, itemSport);
     });
 
     // Enrich configurables to get child prices (CAP=15)
@@ -1656,18 +1650,10 @@ async function enrichConfigurables(products, forceAll = true) {
         const childSkus = children.map(c => c.sku);
         stockMap = await fetchStockMap(childSkus);
         const total = Object.values(stockMap).reduce((a, b) => a + (parseFloat(b) || 0), 0);
-        // v6.3.4: SHOE MSI COMPENSATION
-        // When MSI returns 0 for every child but children DID load with real
-        // price data, trust Magento's status=1 + visibility=4 as the stock
-        // signal. Scoped to shoes via p._is_shoe (set in getShoesWithSpecs).
-        // Racquets never enter this branch — they keep strict qty = total,
-        // so a genuinely sold-out racquet still drops at the isProductAvailable gate.
-        if (total === 0 && p._is_shoe && children.length > 0) {
-          p.qty = 1;
-          p._stock_via_visibility = true;
-        } else {
-          p.qty = total;  // ALWAYS set: 0 means all children are OOS
-        }
+        // v6.3.5: STRICT — parent qty is the true sum of child stock.
+        // No visibility compensation, no fake fallbacks. If total === 0,
+        // the downstream qty>=1 gate will (correctly) drop this product.
+        p.qty = total;
       } catch { /* keep parent qty from fetchStockMap */ }
       p._children_loaded = true;  // Flag: children were successfully fetched
       // Per-child detail for size / price filtering
