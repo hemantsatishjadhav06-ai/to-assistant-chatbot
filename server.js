@@ -292,7 +292,7 @@ ROUTING RULES (STRICT - follow these exactly):
 - ANY query about RACQUETS / RACKETS / PADDLES (tennis racquet, padel racket, pickleball paddle, paddleball paddle, brand-specific) -> MUST call get_racquets_with_specs with the correct sport (tennis/padel/pickleball). NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434).
 - ANY query about SHOES / FOOTWEAR -> MUST call get_shoes_with_specs (never get_products_by_category for shoes).
 - ANY query about BRANDS carried by the store -> call list_brands.
-- BALLS -> get_products_by_category (Tennis Balls=31, Pickleball Balls=252, Padel Balls=273).
+- BALLS -> get_balls. Pass sport='tennis' for tennis balls, sport='pickleball' for pickleball balls, sport='padel' for padel balls. If the customer just says 'balls' (no sport), OMIT sport or pass sport='all' — the tool will merge tennis+pickleball+padel balls. Only products with real quantity >= 1 are returned. NEVER use get_products_by_category for balls.
 - STRINGS -> get_products_by_category (29).
 - BAGS -> get_products_by_category (115).
 - ACCESSORIES -> get_products_by_category (37).
@@ -421,6 +421,23 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
       name: "list_brands",
       description: "List every brand carried by TennisOutlet.in with its internal brand id. Use when the customer asks 'which brands do you carry?' or to discover the exact spelling before filtering.",
       parameters: { type: "object", properties: {} }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_balls",
+      description: "Return BALLS (not ball machines, not accessories) from the correct sport store. Use this for ANY ball query — tennis balls, pickleball balls, padel balls, or a generic 'balls' ask. Tennis Balls cat=31 (tennisoutlet.in), Pickleball Balls cat=252 (pickleballoutlet.in), Padel Balls cat=273 (padeloutlet.in). If the customer did NOT specify a sport OR said 'all balls', omit the sport param (or pass 'all') and this tool will merge results from all three stores. Only products with REAL quantity >= 1 are returned.",
+      parameters: {
+        type: "object",
+        properties: {
+          sport: { type: "string", enum: ["tennis", "pickleball", "padel", "all"], description: "Which sport's ball catalog. Omit or use 'all' to merge tennis + pickleball + padel balls." },
+          brand: { type: "string", description: "Optional brand filter (e.g. Wilson, Head, Babolat, Joola, Franklin)." },
+          min_price: { type: "number", description: "Optional minimum price in INR." },
+          max_price: { type: "number", description: "Optional maximum price in INR." },
+          page_size: { type: "number", default: 10, description: "Max items to return (1-20)." }
+        }
+      }
     }
   },
   {
@@ -1266,36 +1283,21 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     const skus = result.items.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
     const shaped = result.items.map(item => {
+      // v6.2.0: TRUST REAL STOCK ONLY. We do NOT bump qty to 1 here based on
+      // is_in_stock — enrichConfigurables below will set qty to the sum of real
+      // child stock. A shoe whose children are all OOS must be dropped, not faked.
       const qty = stockMap[item.sku] || 0;
-      // For configurables with qty=0, trust Magento's is_in_stock or visibility=4
-      // Magento's own storefront uses this same signal to show products
-      const stockItem = item.extension_attributes?.stock_item;
-      const magentoSaysInStock = stockItem ? !!stockItem.is_in_stock : true; // default trust if no stock_item
-      const effectiveQty = (qty >= 1) ? qty : (magentoSaysInStock ? 1 : 0);
-      // v6.1.5: Use per-SKU sport from category fetch, or fallback to function param
       const itemSport = _sportForSku[item.sku] || sport;
-      return shapeProduct(item, effectiveQty, itemSport);
+      return shapeProduct(item, qty, itemSport);
     });
 
     // Enrich configurables to get child prices (CAP=15)
     // Even if child stock is 0, we still get prices from children
     await enrichConfigurables(shaped, true);
 
-    // v6.1.3: After enrichment, re-check: if enrichment found children with real stock, use that.
-    // If enrichment set qty=0 (children stock API returned 0), RESTORE the trust-based qty.
-    // Magento's stock API is unreliable for configurables on this instance.
-    for (const p of shaped) {
-      if (p && p.type_id === 'configurable' && (p.qty || 0) < 1) {
-        // Enrichment set qty to sum of children (which was 0). Restore trust-based availability.
-        const stockItem = p.magento_in_stock;
-        if (stockItem !== false) {
-          p.qty = 1; // Trust Magento — product is visible on storefront
-          p._stock_source = 'magento_visibility_trust';
-        }
-      }
-    }
-
-    // Filter: include all products with qty >= 1 (same as other categories)
+    // v6.2.0: After enrichConfigurables, p.qty reflects the TRUE sum of child stock.
+    // A configurable with 0 total child qty is genuinely out of stock — DROP IT.
+    // This is what the customer actually wants: no dead listings / "only 1 left" fakes.
     const inStock = shaped.filter(p => p && (p.qty || 0) >= 1);
 
     // Apply price filters ONLY (no size filtering - LLM handles size)
@@ -1329,24 +1331,18 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       }
     }
 
-    // v6.1.5: FINAL SAFETY NET — ensure every shoe has qty >= 1.
-    // Magento's stock API is broken for configurables on this instance; we trust
-    // visibility=4 + status=enabled as the stock signal.  No shoe should leave
-    // this function with qty=0.
-    for (const p of available) {
-      if (p && (p.qty || 0) < 1) {
-        p.qty = 1;
-        p._stock_source = 'shoe_safety_net';
-      }
-    }
+    // v6.2.0: No more fake-qty safety nets. Anything reaching this point has
+    // already passed the `qty >= 1` filter above, so every shoe has REAL stock.
+    // Final hardening: drop any stragglers with qty < 1 (should be a no-op).
+    available = available.filter(p => p && (p.qty || 0) >= 1);
 
-    // Strip internals — same as stripInternals but without the qty < 1 kill
     available = available.filter(p => {
       if (!p) return false;
+      // v6.2.0: HARD GATE — every shoe leaving the server has real stock.
+      if ((p.qty || 0) < 1) return false;
       p.in_stock = true;
-      // v6.1.5: Remove qty from LLM output for shoes — stock is unreliable,
-      // all shoes here are available (we verified visibility+status).
-      // Showing qty=1 to LLM would confuse it into saying "only 1 left".
+      // Still hide the exact number from the LLM so it doesn't say "only 1 left".
+      // But only AFTER we've verified qty >= 1 above.
       delete p.qty;
       delete p._children;
       delete p.type_id;
@@ -1365,9 +1361,10 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
       const sorted = inStock.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
       available = sorted.slice(0, 20).filter(p => {
         if (!p) return false;
-        if ((p.qty || 0) < 1) p.qty = 1; // safety net
+        // v6.2.0: HARD GATE — real stock only, no safety-net fakes.
+        if ((p.qty || 0) < 1) return false;
         p.in_stock = true;
-        delete p.qty; // don't expose unreliable qty to LLM
+        delete p.qty; // don't show exact qty to LLM (but we verified qty >= 1)
         delete p._children; delete p.type_id; delete p.magento_in_stock;
         delete p._children_loaded; delete p._stock_source;
         return true;
@@ -1613,6 +1610,74 @@ function listBrands() {
   const map = ATTR_OPTIONS['brands'] || {};
   const brands = Object.entries(map).map(([id, label]) => ({ id, name: label })).filter(b => b.name && b.name.trim());
   return { total: brands.length, brands };
+}
+
+// ==================== BALLS (sport-aware, v6.2.0) ====================
+// Categories: Tennis Balls=31, Pickleball Balls=252, Padel Balls=273
+// Mirrors getShoesWithSpecs: honors an explicit sport, or merges ALL three
+// stores when sport is omitted / 'all' so a generic "balls" query returns
+// every ball product (tennis + pickleball + padel) with real qty >= 1.
+const BALL_CATEGORIES = { tennis: 31, pickleball: 252, padel: 273 };
+
+async function getBalls({ sport = null, brand = null, min_price = null, max_price = null, page_size = 10 } = {}) {
+  try {
+    const sportKey = String(sport || 'all').toLowerCase();
+    const searchAllCats = !sport || sportKey === 'all';
+    const cats = searchAllCats
+      ? Object.entries(BALL_CATEGORIES)               // [[sport, catId], ...]
+      : [[sportKey, BALL_CATEGORIES[sportKey] || BALL_CATEGORIES.tennis]];
+
+    // Fetch every sport category in parallel, tagging each product with its store.
+    const results = await Promise.allSettled(
+      cats.map(([, catId]) => getProductsByCategory(
+        catId,
+        Math.max(page_size * 3, 20),
+        { min_price, max_price, sport: CATEGORY_TO_SPORT[catId] || 'tennis' }
+      ))
+    );
+
+    const merged = [];
+    const seen = new Set();
+    for (const r of results) {
+      if (r.status !== 'fulfilled' || !r.value || !Array.isArray(r.value.products)) continue;
+      for (const p of r.value.products) {
+        if (!p || seen.has(p.sku)) continue;
+        // Optional brand filter — case-insensitive contains on resolved brand label.
+        if (brand && !String(p.brand || '').toLowerCase().includes(String(brand).toLowerCase())) continue;
+        seen.add(p.sku);
+        merged.push(p);
+      }
+    }
+
+    // HARD GATE: getProductsByCategory already applied qty >= 1, but keep a
+    // belt-and-braces check so no zero-qty ball ever leaves this function.
+    const inStock = merged.filter(p => p && (p.in_stock === true || (p.qty || 0) >= 1));
+
+    // Sort: cheapest first when a price band is active, otherwise newest via
+    // category order preserved from upstream.
+    const sorted = (min_price || max_price)
+      ? inStock.slice().sort((a, b) => (a.price || 0) - (b.price || 0))
+      : inStock;
+    const showing = sorted.slice(0, Math.min(page_size, 20));
+
+    const message = showing.length
+      ? (searchAllCats
+          ? `Showing ${showing.length} in-stock balls across tennis, pickleball and padel stores.`
+          : `Showing ${showing.length} in-stock ${sportKey} balls.`)
+      : `No ${searchAllCats ? '' : sportKey + ' '}balls with real stock match those filters.`;
+
+    return {
+      sport: searchAllCats ? 'all' : sportKey,
+      filters_applied: { brand, min_price, max_price },
+      products: showing,
+      total: inStock.length,
+      showing: showing.length,
+      message
+    };
+  } catch (error) {
+    console.error('getBalls error:', error.response?.status, error.message);
+    return { error: true, message: `Unable to fetch balls. ${error.message}` };
+  }
 }
 
 // ==================== BALL MACHINES (v3.3.2) ====================
@@ -1878,6 +1943,7 @@ async function executeFunction(name, args, sport = 'tennis') {
     }
     case 'get_racquets_with_specs': return await getRacquetsWithSpecs({ ...(args || {}), sport: args?.sport || sport });
     case 'list_brands': return listBrands();
+    case 'get_balls': return await getBalls({ ...(args || {}) });
     case 'get_ball_machines': return await getBallMachines({ ...(args || {}), sport });
     case 'find_categories': return { matches: findCategoriesByKeyword(args.keyword) };
     case 'list_categories': return { categories: listAllCategories(args || {}) };
@@ -1908,6 +1974,19 @@ const INTENT_RULES = [
   { intent: 'ball_machine',
     rx: [/ball\s*machine/i, /ball\s*thrower/i, /ball\s*cannon/i, /ball\s*launcher/i, /ball\s*feeder/i, /\btenniix\b/i, /\bai\s*ball\b/i, /smart\s*ball/i],
     force: 'get_ball_machines' },
+  // v6.2.0: sport-specific ball intents must win over the generic ball rule.
+  { intent: 'pickleball_ball',
+    rx: [/pickle\s*ball\s*balls?/i, /balls?\s+for\s+pickle/i, /pickleball\s+ball/i],
+    force: 'get_balls', hintArgs: { sport: 'pickleball' } },
+  { intent: 'padel_ball',
+    rx: [/\bpadel\b.*balls?/i, /balls?.*\bpadel\b/i],
+    force: 'get_balls', hintArgs: { sport: 'padel' } },
+  { intent: 'tennis_ball',
+    rx: [/tennis\s+balls?/i, /balls?\s+for\s+tennis/i],
+    force: 'get_balls', hintArgs: { sport: 'tennis' } },
+  { intent: 'ball',
+    rx: [/\bballs?\b/i],
+    force: 'get_balls' },
   { intent: 'pickleball_paddle',
     rx: [/pickle\s*ball.*paddle/i, /paddle.*pickle/i, /pickleball\s+paddle/i, /paddleball\s*paddle/i, /paddle\s*ball\s*paddle/i, /pickle\s*paddle/i, /paddleball/i],
     force: 'get_racquets_with_specs', hintArgs: { sport: 'pickleball' } },
