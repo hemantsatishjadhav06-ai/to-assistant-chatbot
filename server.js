@@ -685,6 +685,39 @@ let CATEGORY_MAP = [];
 const BALL_MACHINE_CATEGORY_IDS = [];
 let CATEGORY_INDEX = {};  // keyword ÃÂ¢ÃÂÃÂ [{ id, name, score }]
 
+// v6.4.1: lightweight English-ish stemmer. Input: token. Output: Set of
+// equivalent forms (at minimum the original + its singular/plural counterpart).
+// No external lib — we deliberately cover just the cases this catalog hits
+// (bags<->bag, shoes<->shoe, balls<->ball, racquets<->racquet, accessories<->accessory).
+function _stemVariants(token) {
+  const out = new Set();
+  if (!token) return out;
+  const t = String(token).toLowerCase();
+  out.add(t);
+  if (t.length < 3) return out;  // don't stem 2-letter tokens
+
+  // Plural -> singular
+  if (/ies$/.test(t) && t.length > 4) {
+    out.add(t.slice(0, -3) + 'y');           // accessories -> accessory
+  } else if (/(ches|shes|sses|xes)$/.test(t)) {
+    out.add(t.slice(0, -2));                  // matches -> match, dresses -> dress
+  } else if (/es$/.test(t) && t.length > 4) {
+    out.add(t.slice(0, -2));                  // shoes -> sho (noisy fallback)
+    out.add(t.slice(0, -1));                  // shoes -> shoe (the real win)
+  } else if (/s$/.test(t) && !/ss$/.test(t) && t.length > 3) {
+    out.add(t.slice(0, -1));                  // bags -> bag, balls -> ball
+  }
+
+  // Singular -> plural (covers user typing "bag" when index has "bags")
+  if (!/s$/.test(t)) {
+    if (/(s|x|z|ch|sh)$/.test(t)) out.add(t + 'es');
+    else if (/[^aeiou]y$/.test(t)) out.add(t.slice(0, -1) + 'ies');
+    else out.add(t + 's');
+  }
+
+  return out;
+}
+
 // Build the inverted index from the flat category list.
 function buildCategoryIndex(cats) {
   const idx = {};
@@ -695,12 +728,22 @@ function buildCategoryIndex(cats) {
     const tokens = new Set();
     const raw = `${c.name} ${c.path || ''}`.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/);
     for (const t of raw) {
-      if (t.length >= 2 && !stopwords.has(t)) tokens.add(t);
+      if (t.length >= 2 && !stopwords.has(t)) {
+        // v6.4.1: index the token AND its singular/plural variants so
+        // "Pickleball Bags" is reachable from "pickle bag" / "bag" etc.
+        for (const v of _stemVariants(t)) tokens.add(v);
+      }
     }
-    // Also add bigrams from name (e.g. "pure aero", "ball machine")
+    // Also add bigrams from name (e.g. "pure aero", "ball machine"). For each
+    // bigram also add a singular-right variant: "pickleball bags" -> "pickleball bag".
     const nameTokens = c.name.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(t => t.length >= 2);
     for (let i = 0; i < nameTokens.length - 1; i++) {
-      tokens.add(`${nameTokens[i]} ${nameTokens[i + 1]}`);
+      const left = nameTokens[i];
+      const right = nameTokens[i + 1];
+      tokens.add(`${left} ${right}`);
+      for (const rv of _stemVariants(right)) {
+        if (rv !== right) tokens.add(`${left} ${rv}`);
+      }
     }
     for (const token of tokens) {
       if (!idx[token]) idx[token] = [];
@@ -716,32 +759,128 @@ function buildCategoryIndex(cats) {
   return idx;
 }
 
+// v6.4.1: explicit synonym/alias map. Small, deterministic, easy to audit.
+// Applied per-token BEFORE index lookup in resolveCategoriesFromQuery.
+const QUERY_SYNONYMS = {
+  // Sport shortcuts and typos
+  'pickle': 'pickleball',
+  'pickball': 'pickleball',
+  'pickel': 'pickleball',
+  'padle': 'padel',
+  'paddel': 'padel',
+  'paddle': 'padel',
+  // Product-noun aliases
+  'racket': 'racquet',
+  'rackets': 'racquets',
+  'footwear': 'shoes',
+  'sneaker': 'shoes',
+  'sneakers': 'shoes',
+  'trainer': 'shoes',
+  'trainers': 'shoes',
+  'kitbag': 'bag',
+  'kitbags': 'bags',
+  'pouch': 'bag',
+  'pouches': 'bags',
+  'carrier': 'bag',
+  'carriers': 'bags',
+  'backpack': 'bag',
+  'backpacks': 'bags',
+  'duffel': 'bag',
+  'duffels': 'bags',
+  'duffle': 'bag',
+  'duffles': 'bags'
+};
+
+// Known product-noun safety net: if the resolver misses entirely but the user
+// clearly asked for a category that MUST exist, fall back to these keywords.
+// Index keys are checked as-is after synonym expansion + stemming.
+const SAFETY_NET_NOUNS = new Set([
+  'bag','bags','shoe','shoes','ball','balls','racquet','racquets',
+  'grip','grips','string','strings','apparel','accessories','accessory'
+]);
+const KNOWN_SPORTS = new Set(['tennis','pickleball','padel']);
+
+// v6.4.0: Track the last lazy-reload attempt so we don't hammer Magento when
+// initCategoryMap() fails at boot. If the index is still empty N seconds later,
+// fire one reload in the background.
+let _lastLazyCategoryReload = 0;
+function _maybeLazyReloadCategoryMap() {
+  if (Object.keys(CATEGORY_INDEX).length > 0) return;
+  const now = Date.now();
+  if (now - _lastLazyCategoryReload < 30000) return;  // throttle: at most once per 30s
+  _lastLazyCategoryReload = now;
+  console.log('[category-index] empty — triggering lazy reload');
+  initCategoryMap().catch(e => console.log('[category-index] lazy reload failed:', e.message));
+}
+
 // Resolve a natural-language query to the best category IDs using the inverted index.
 function resolveCategoriesFromQuery(query, maxResults = 3) {
-  if (!query || !CATEGORY_INDEX || Object.keys(CATEGORY_INDEX).length === 0) return [];
+  if (!query || !CATEGORY_INDEX || Object.keys(CATEGORY_INDEX).length === 0) {
+    _maybeLazyReloadCategoryMap();
+    return [];
+  }
   const q = String(query).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').trim();
-  const queryTokens = q.split(/\s+/).filter(t => t.length >= 2);
-  if (queryTokens.length === 0) return [];
+  const rawTokens = q.split(/\s+/).filter(t => t.length >= 2);
+  if (rawTokens.length === 0) return [];
+
+  // v6.4.1: expand each token through QUERY_SYNONYMS then add stem variants
+  // (singular + plural). So "pickle bag" -> [["pickleball"],["bag","bags"]]
+  // and "any shoes" -> [["any","anys"],["shoes","shoe"]].
+  const queryTokens = rawTokens.map(t => QUERY_SYNONYMS[t] || t);
+  const expanded = queryTokens.map(t => {
+    const vs = _stemVariants(t);
+    vs.add(t);
+    return Array.from(vs);
+  });
 
   // Score each category by how many query tokens it matches
   const catScores = {};  // catId ÃÂ¢ÃÂÃÂ { ...catInfo, matchCount, totalScore }
 
-  // Try bigrams first (more specific)
-  for (let i = 0; i < queryTokens.length - 1; i++) {
-    const bigram = `${queryTokens[i]} ${queryTokens[i + 1]}`;
-    if (CATEGORY_INDEX[bigram]) {
-      for (const cat of CATEGORY_INDEX[bigram]) {
-        if (!catScores[cat.id]) catScores[cat.id] = { ...cat, matchCount: 0, totalScore: 0 };
-        catScores[cat.id].matchCount += 2;  // bigram match counts double
-        catScores[cat.id].totalScore += cat.score * 2;
+  // Try bigrams first (more specific). Cross-product expanded forms at
+  // positions i and i+1 so "pickle bag" tries "pickleball bag" AND "pickleball bags".
+  for (let i = 0; i < expanded.length - 1; i++) {
+    const seen = new Set();
+    for (const l of expanded[i]) {
+      for (const r of expanded[i + 1]) {
+        const bigram = `${l} ${r}`;
+        if (seen.has(bigram)) continue;
+        seen.add(bigram);
+        if (CATEGORY_INDEX[bigram]) {
+          for (const cat of CATEGORY_INDEX[bigram]) {
+            if (!catScores[cat.id]) catScores[cat.id] = { ...cat, matchCount: 0, totalScore: 0 };
+            catScores[cat.id].matchCount += 2;  // bigram match counts double
+            catScores[cat.id].totalScore += cat.score * 2;
+          }
+        }
       }
     }
   }
 
-  // Then unigrams
-  for (const token of queryTokens) {
-    if (CATEGORY_INDEX[token]) {
-      for (const cat of CATEGORY_INDEX[token]) {
+  // Then unigrams — count each category at most once per query position so
+  // plural+singular variants don't inflate the match score.
+  for (const variants of expanded) {
+    const countedCats = new Set();
+    for (const tok of variants) {
+      if (!CATEGORY_INDEX[tok]) continue;
+      for (const cat of CATEGORY_INDEX[tok]) {
+        if (countedCats.has(cat.id)) continue;
+        countedCats.add(cat.id);
+        if (!catScores[cat.id]) catScores[cat.id] = { ...cat, matchCount: 0, totalScore: 0 };
+        catScores[cat.id].matchCount += 1;
+        catScores[cat.id].totalScore += cat.score;
+      }
+    }
+  }
+
+  // v6.4.1 safety net: if we still got nothing but the query names a known
+  // product noun or sport, try bare-token lookups. Covers tokenizer edge cases.
+  if (Object.keys(catScores).length === 0) {
+    const allVariants = new Set();
+    for (const vs of expanded) for (const v of vs) allVariants.add(v);
+    for (const v of allVariants) {
+      if (!SAFETY_NET_NOUNS.has(v) && !KNOWN_SPORTS.has(v)) continue;
+      if (!CATEGORY_INDEX[v]) continue;
+      for (const cat of CATEGORY_INDEX[v]) {
         if (!catScores[cat.id]) catScores[cat.id] = { ...cat, matchCount: 0, totalScore: 0 };
         catScores[cat.id].matchCount += 1;
         catScores[cat.id].totalScore += cat.score;
@@ -1149,8 +1288,12 @@ function shapeProduct(item, qty, sport = 'tennis') {
 function isProductAvailable(p) {
   if (!p) return false;
   if (p.type_id === 'configurable') {
-    // Must have verified children. If enrichment timed out, exclude.
-    if (!p._children_loaded) return false;
+    // v6.4.0: If children loaded, trust the enriched qty (sum of child stock).
+    // If children NOT loaded (timeout OR Magento returned an empty children
+    // array — e.g. PISH0008 has MSI qty but no configurable link), fall back
+    // to parent MSI qty instead of silently dropping the product.
+    if (p._children_loaded) return (p.qty || 0) >= 1;
+    // Unenriched configurable with parent MSI qty>=1 is still worth surfacing.
     return (p.qty || 0) >= 1;
   }
   return (p.qty || 0) >= 1;
@@ -1190,12 +1333,18 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
 
-    const inStock = shaped.filter(isProductAvailable);
-    let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
+    // v6.4.0: tag availability, keep OOS as fallback tier.
+    let pool = applyPriceSizeFilters(shaped, { min_price, max_price });
     const beforeCustomer = pool.length;
-    pool = applyPriceSizeFilters(pool, { min_price, max_price });
-    const filtered_out = beforeCustomer - pool.length;
-    const final = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20)));
+    const filtered_out = shaped.length - pool.length;
+    pool = pool.sort((a, b) => {
+      const aIn = ((a.qty || 0) >= 1 && isProductAvailable(a)) ? 1 : 0;
+      const bIn = ((b.qty || 0) >= 1 && isProductAvailable(b)) ? 1 : 0;
+      if (aIn !== bIn) return bIn - aIn;
+      return (b.qty || 0) - (a.qty || 0);
+    });
+    const tagged = stripInternals(pool);
+    const final = mergeAvailability(tagged, pageSize);
     let message = null;
     if (final.length === 0 && beforeCustomer > 0) {
       const bits = [];
@@ -1279,12 +1428,18 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
         const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
 
-    const inStock = shaped.filter(isProductAvailable);
-    let pool = inStock;  // SMART: configurables trusted via Magento salability, simples checked by qty
+    // v6.4.0: tag availability, keep OOS as fallback tier.
+    let pool = applyPriceSizeFilters(shaped, { min_price, max_price });
     const beforeCustomer = pool.length;
-    pool = applyPriceSizeFilters(pool, { min_price, max_price });
-    const filtered_out = beforeCustomer - pool.length;
-    const final = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(pageSize, 20)));
+    const filtered_out = shaped.length - pool.length;
+    pool = pool.sort((a, b) => {
+      const aIn = ((a.qty || 0) >= 1 && isProductAvailable(a)) ? 1 : 0;
+      const bIn = ((b.qty || 0) >= 1 && isProductAvailable(b)) ? 1 : 0;
+      if (aIn !== bIn) return bIn - aIn;
+      return (b.qty || 0) - (a.qty || 0);
+    });
+    const tagged = stripInternals(pool);
+    const final = mergeAvailability(tagged, pageSize);
     let message = null;
     if (final.length === 0 && beforeCustomer > 0) {
       const bits = [];
@@ -1402,25 +1557,20 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
     // Even if child stock is 0, we still get prices from children
     await enrichConfigurables(shaped, true);
 
-    // v6.2.0: After enrichConfigurables, p.qty reflects the TRUE sum of child stock.
-    // A configurable with 0 total child qty is genuinely out of stock — DROP IT.
-    // This is what the customer actually wants: no dead listings / "only 1 left" fakes.
-    const inStock = shaped.filter(p => p && (p.qty || 0) >= 1);
+    // v6.4.0: TAG availability (don't pre-drop OOS). `mergeAvailability` picks
+    // the final tier mix — in-stock first, OOS as graceful fallback when the
+    // catalog is sold out. This replaces the v6.2.0 hard qty>=1 gate that was
+    // making the assistant say "no shoes" when every SKU was simply sold out.
 
-    // Apply price filters ONLY (no size filtering - LLM handles size)
-    let pool = inStock;
-    const beforePriceFilter = pool.length;
-    pool = applyPriceSizeFilters(pool, { min_price, max_price }); // size deliberately NOT passed
+    // Apply price filters to SHAPED (need _children for size logic downstream).
+    const beforePriceFilter = shaped.length;
+    let pool = applyPriceSizeFilters(shaped, { min_price, max_price }); // size deliberately NOT passed
     const filtered_out = beforePriceFilter - pool.length;
 
-    // Sort by qty descending, take up to 20
-    let available = pool.sort((a, b) => (b.qty || 0) - (a.qty || 0)).slice(0, 20);
-
-    // v6.1.0: For size queries, extract sizes from child SKUs for LLM
+    // If a size was asked for, enrich products with `sizes_available` (from children).
     if (size) {
-      for (const p of available) {
+      for (const p of pool) {
         if (Array.isArray(p._children) && p._children.length > 0) {
-          // Extract ALL sizes from child SKUs (not filtered by qty — stock is unreliable)
           const allSizes = p._children
             .map(c => {
               const skuMatch = c.sku.match(/-([^-]+)$/);
@@ -1431,63 +1581,53 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
             p.sizes_available = [...new Set(allSizes)].sort((a, b) => parseFloat(a) - parseFloat(b));
           }
         }
-        // Also extract from specs.available_sizes if present
         if (p.specs && Array.isArray(p.specs.available_sizes) && p.specs.available_sizes.length > 0) {
           p.sizes_available = p.specs.available_sizes;
         }
       }
     }
 
-    // v6.2.0: No more fake-qty safety nets. Anything reaching this point has
-    // already passed the `qty >= 1` filter above, so every shoe has REAL stock.
-    // Final hardening: drop any stragglers with qty < 1 (should be a no-op).
-    available = available.filter(p => p && (p.qty || 0) >= 1);
-
-    available = available.filter(p => {
-      if (!p) return false;
-      // v6.2.0: HARD GATE — every shoe leaving the server has real stock.
-      if ((p.qty || 0) < 1) return false;
-      p.in_stock = true;
-      // Still hide the exact number from the LLM so it doesn't say "only 1 left".
-      // But only AFTER we've verified qty >= 1 above.
-      delete p.qty;
-      delete p._children;
-      delete p.type_id;
-      delete p.magento_in_stock;
-      delete p._children_loaded;
-      delete p._stock_source;
-      return true;
+    // Sort: in-stock first, then qty desc so the LLM sees available SKUs at the top.
+    pool = pool.sort((a, b) => {
+      const aIn = ((a.qty || 0) >= 1) ? 1 : 0;
+      const bIn = ((b.qty || 0) >= 1) ? 1 : 0;
+      if (aIn !== bIn) return bIn - aIn;
+      return (b.qty || 0) - (a.qty || 0);
     });
 
-    // Price fallback - if price filter gave 0 results, show closest by price
+    const tagged = stripInternals(pool.slice(0, 40));
+    let available = mergeAvailability(tagged, page_size);
+
+    // Price-range fallback: if price filter wiped in-stock results but other
+    // in-stock shoes exist outside the band, show the closest-priced ones.
     let message = null;
-    if (available.length === 0 && (min_price || max_price) && beforePriceFilter > 0) {
+    const inStockExist = shaped.some(p => (p.qty || 0) >= 1);
+    const inStockInPool = available.some(p => p && p.in_stock);
+    if (!inStockInPool && inStockExist && (min_price || max_price)) {
       const mid = (min_price && max_price) ? (parseFloat(min_price) + parseFloat(max_price)) / 2
                 : max_price ? parseFloat(max_price) * 0.8
                 : min_price ? parseFloat(min_price) * 1.2 : 5000;
-      const sorted = inStock.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
-      available = sorted.slice(0, 20).filter(p => {
-        if (!p) return false;
-        // v6.2.0: HARD GATE — real stock only, no safety-net fakes.
-        if ((p.qty || 0) < 1) return false;
-        p.in_stock = true;
-        delete p.qty; // don't show exact qty to LLM (but we verified qty >= 1)
-        delete p._children; delete p.type_id; delete p.magento_in_stock;
-        delete p._children_loaded; delete p._stock_source;
-        return true;
-      });
+      const inStockSorted = shaped
+        .filter(p => (p.qty || 0) >= 1)
+        .sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
+      available = mergeAvailability(stripInternals(inStockSorted.slice(0, 20)), page_size);
       const bits = [];
-      if (min_price) bits.push(`\u20B9${Number(min_price).toLocaleString('en-IN')}`);
-      if (max_price) bits.push(`\u20B9${Number(max_price).toLocaleString('en-IN')}`);
-      message = `No exact matches in the ${bits.join(' to ')} range. Showing the closest available shoes by price...`;
+      if (min_price) bits.push(`₹${Number(min_price).toLocaleString('en-IN')}`);
+      if (max_price) bits.push(`₹${Number(max_price).toLocaleString('en-IN')}`);
+      message = `No exact matches in the ${bits.join(' to ')} range. Showing the closest available shoes by price.`;
     }
 
     if (size && available.length > 0) {
-      message = `LLM INSTRUCTION: Customer asked for ${sport} shoes in size ${size}. The size of each shoe is the LAST NUMBER in its product name (e.g. "Asics Gel Resolution 9 - 10" = size 10, "Nike Court Vapor 11.5" = size 11.5). Read each product name, identify the trailing size number, and show ONLY the shoes that match size ${size}. If no products in this list match size ${size} exactly, tell the customer plainly: "We don't have size ${size} in ${sport} shoes right now" and then offer the 2-3 closest available sizes from THIS list by name. Do NOT tell the customer to check on the product page. Do NOT mix in shoes from other sports.`;
+      message = `LLM INSTRUCTION: Customer asked for ${sport} shoes in size ${size}. The size of each shoe is the LAST NUMBER in its product name (e.g. "Asics Gel Resolution 9 - 10" = size 10, "Nike Court Vapor 11.5" = size 11.5). Read each product name, identify the trailing size number, and show ONLY the shoes that match size ${size}. If no products in this list match size ${size} exactly, tell the customer plainly: "We don\'t have size ${size} in ${sport} shoes right now" and then offer the 2-3 closest available sizes from THIS list by name. Do NOT tell the customer to check on the product page. Do NOT mix in shoes from other sports.`;
     } else if (!message) {
-      message = available.length > 0
-        ? `Showing ${available.length} ${searchAllCats ? '' : sport + ' '}shoes with qty >= 1.`
-        : `No ${searchAllCats ? '' : sport + ' '}shoes with stock found matching those filters.`;
+      const inStockCount = available.filter(p => p && p.in_stock).length;
+      if (inStockCount > 0) {
+        message = `Showing ${inStockCount} ${searchAllCats ? '' : sport + ' '}shoes in stock${available.length > inStockCount ? ' (+' + (available.length - inStockCount) + ' currently sold out shown as fallback)' : ''}.`;
+      } else if (available.length > 0) {
+        message = `All ${searchAllCats ? '' : sport + ' '}shoes matching your request are currently sold out. Showing ${available.length} options — let the customer know they are out of stock and offer to notify them when restocked.`;
+      } else {
+        message = `No ${searchAllCats ? '' : sport + ' '}shoes found for those filters.`;
+      }
     }
 
     return {
@@ -1572,30 +1712,35 @@ async function getRacquetsWithSpecs({ sport = 'tennis', brand = null, skill_leve
     // Configurable parents store price=0; child enrichment reveals real prices.
     await enrichConfigurables(shaped);
 
-    const inStock = shaped.filter(isProductAvailable);
-    let pool = inStock;
+    // v6.4.0: Tag availability; merge in-stock + OOS fallback so users always see options.
+    let pool = applyPriceSizeFilters(shaped, { min_price, max_price });
     const beforeCustomer = pool.length;
-    pool = applyPriceSizeFilters(pool, { min_price, max_price });
-    const filtered_out = beforeCustomer - pool.length;
+    const filtered_out = shaped.length - pool.length;
+    const inStockShaped = shaped.filter(isProductAvailable);
 
-    // v5.7.0: If price filter gives 0 results, FALL BACK to showing all in-stock racquets
-    // sorted by price proximity to the requested range. Never return empty when products exist.
+    // If price filter eliminates everything (but in-stock racquets DO exist
+    // outside the price range), fall back to the closest-priced in-stock items.
     let available;
     let message = null;
-    if (pool.length === 0 && beforeCustomer > 0) {
-      // Sort by closeness to the midpoint of the requested price range
+    if (pool.length === 0 && inStockShaped.length > 0) {
       const mid = (min_price && max_price) ? (min_price + max_price) / 2
                 : max_price ? max_price * 0.8
                 : min_price ? min_price * 1.2
                 : 15000;
-      const sorted = inStock.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
-      available = stripInternals(sorted.slice(0, Math.min(page_size, 20)));
+      const sorted = inStockShaped.sort((a, b) => Math.abs((a.price || 0) - mid) - Math.abs((b.price || 0) - mid));
+      available = mergeAvailability(stripInternals(sorted.slice(0, Math.min(page_size, 20))), page_size);
       const bits = [];
-      if (min_price) bits.push(`above ÃÂ¢ÃÂÃÂ¹${Number(min_price).toLocaleString('en-IN')}`);
-      if (max_price) bits.push(`under ÃÂ¢ÃÂÃÂ¹${Number(max_price).toLocaleString('en-IN')}`);
-      message = `No exact matches in the ${bits.join(' and ')} range. Showing the closest available ${sport} racquets by price. The customer asked for ${bits.join(' and ')} ÃÂ¢ÃÂÃÂ highlight any that are close and mention the actual prices clearly.`;
+      if (min_price) bits.push(`above ₹${Number(min_price).toLocaleString('en-IN')}`);
+      if (max_price) bits.push(`under ₹${Number(max_price).toLocaleString('en-IN')}`);
+      message = `No exact matches in the ${bits.join(' and ')} range. Showing the closest available ${sport} racquets by price.`;
     } else {
-      available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
+      const sorted = pool.sort((a, b) => {
+        const aIn = ((a.qty || 0) >= 1 && isProductAvailable(a)) ? 1 : 0;
+        const bIn = ((b.qty || 0) >= 1 && isProductAvailable(b)) ? 1 : 0;
+        if (aIn !== bIn) return bIn - aIn;
+        return (b.qty || 0) - (a.qty || 0);
+      });
+      available = mergeAvailability(stripInternals(sorted), page_size);
     }
     return {
       sport, filters_applied: { brand, skill_level, playing_style, min_price, max_price },
@@ -1712,23 +1857,41 @@ function applyPriceSizeFilters(products, { min_price = null, max_price = null, s
   });
 }
 
-// Strip internal-only fields + HARD stock gate before returning to the LLM.
-// v5.2.0: returns a NEW array filtered by qty >= 1 ÃÂ¢ÃÂÃÂ no zero-qty product can escape.
+// Strip internal-only fields and tag availability before returning to the LLM.
+// v6.4.0: graceful OOS — returns ALL shaped products, each tagged with
+// in_stock + availability. Caller uses mergeAvailability() to pick the final
+// tier mix. This lets the assistant show "currently sold out" cards instead of
+// a flat "we don't have any" when every SKU is OOS.
 function stripInternals(products) {
-  return (products || []).filter(p => {
-    if (!p) return false;
-    // HARD GATE: only products with real stock leave the server
-    if ((p.qty || 0) < 1) return false;
-    p.in_stock = true;
+  return (products || []).map(p => {
+    if (!p) return null;
+    const hasStock = (p.qty || 0) >= 1;
+    p.in_stock = hasStock;
+    p.availability = hasStock ? 'in_stock' : 'out_of_stock';
     delete p._children;
     delete p.type_id;
     delete p.magento_in_stock;
     delete p._children_loaded;
     delete p._stock_source;
-    return true;
-  });
+    return p;
+  }).filter(Boolean);
 }
 
+// v6.4.0: Pick the final response tier mix.
+// - Always prefer in-stock (up to pageSize).
+// - If in-stock is non-empty but < 3, backfill with up to (3 - inStockCount)
+//   OOS items so users see alternatives instead of a single card.
+// - If in-stock == 0, return up to 5 OOS items so the assistant can say
+//   "currently sold out — notify me / see alternatives".
+function mergeAvailability(tagged, pageSize = 10) {
+  const list = Array.isArray(tagged) ? tagged : [];
+  const inStock = list.filter(p => p && p.in_stock);
+  const oos = list.filter(p => p && !p.in_stock);
+  if (inStock.length >= pageSize) return inStock.slice(0, pageSize);
+  if (inStock.length === 0) return oos.slice(0, Math.min(5, pageSize));
+  const need = Math.max(0, Math.min(pageSize, 3) - inStock.length);
+  return [...inStock, ...oos.slice(0, need)].slice(0, pageSize);
+}
 function listBrands() {
   const map = ATTR_OPTIONS['brands'] || {};
   const brands = Object.entries(map).map(([id, label]) => ({ id, name: label })).filter(b => b.name && b.name.trim());
@@ -1772,28 +1935,33 @@ async function getBalls({ sport = null, brand = null, min_price = null, max_pric
       }
     }
 
-    // HARD GATE: getProductsByCategory already applied qty >= 1, but keep a
-    // belt-and-braces check so no zero-qty ball ever leaves this function.
-    const inStock = merged.filter(p => p && (p.in_stock === true || (p.qty || 0) >= 1));
-
-    // Sort: cheapest first when a price band is active, otherwise newest via
-    // category order preserved from upstream.
+    // v6.4.0: getProductsByCategory now tags in_stock/OOS and already applies
+    // mergeAvailability internally. Balls arrive pre-tagged — just re-apply
+    // mergeAvailability across the merged set to re-balance the in-stock/OOS mix.
     const sorted = (min_price || max_price)
-      ? inStock.slice().sort((a, b) => (a.price || 0) - (b.price || 0))
-      : inStock;
-    const showing = sorted.slice(0, Math.min(page_size, 20));
+      ? merged.slice().sort((a, b) => {
+          const aIn = a.in_stock ? 1 : 0;
+          const bIn = b.in_stock ? 1 : 0;
+          if (aIn !== bIn) return bIn - aIn;
+          return (a.price || 0) - (b.price || 0);
+        })
+      : merged.slice().sort((a, b) => (b.in_stock ? 1 : 0) - (a.in_stock ? 1 : 0));
+    const showing = mergeAvailability(sorted, page_size);
+    const inStockCount = showing.filter(p => p && p.in_stock).length;
 
-    const message = showing.length
-      ? (searchAllCats
-          ? `Showing ${showing.length} in-stock balls across tennis, pickleball and padel stores.`
-          : `Showing ${showing.length} in-stock ${sportKey} balls.`)
-      : `No ${searchAllCats ? '' : sportKey + ' '}balls with real stock match those filters.`;
+    const message = showing.length === 0
+      ? `No ${searchAllCats ? '' : sportKey + ' '}balls match those filters.`
+      : inStockCount === 0
+        ? `All ${searchAllCats ? '' : sportKey + ' '}balls matching your request are currently sold out. Showing ${showing.length} options — tell the customer they are out of stock and offer to notify them when restocked.`
+        : (searchAllCats
+            ? `Showing ${inStockCount} in-stock balls across tennis, pickleball and padel${showing.length > inStockCount ? ' (+' + (showing.length - inStockCount) + ' sold out)' : ''}.`
+            : `Showing ${inStockCount} in-stock ${sportKey} balls${showing.length > inStockCount ? ' (+' + (showing.length - inStockCount) + ' sold out)' : ''}.`);
 
     return {
       sport: searchAllCats ? 'all' : sportKey,
       filters_applied: { brand, min_price, max_price },
       products: showing,
-      total: inStock.length,
+      total: merged.length,
       showing: showing.length,
       message
     };
@@ -1879,8 +2047,13 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
 
   let pool = [...seen.values()].filter(isProductAvailable);  // SMART: configurables trusted, simples checked
   pool = applyPriceSizeFilters(pool, { min_price, max_price });
-  const available = stripInternals(pool.sort((a, b) => b.qty - a.qty).slice(0, Math.min(page_size, 20)));
-
+  const sortedPool = pool.sort((a, b) => {
+    const aIn = ((a.qty || 0) >= 1 && isProductAvailable(a)) ? 1 : 0;
+    const bIn = ((b.qty || 0) >= 1 && isProductAvailable(b)) ? 1 : 0;
+    if (aIn !== bIn) return bIn - aIn;
+    return (b.qty || 0) - (a.qty || 0);
+  });
+  const available = mergeAvailability(stripInternals(sortedPool), page_size);
   let message = null;
   if (available.length === 0 && seen.size > 0) {
     message = `Found ${seen.size} ball-machine products, but none match the requested price filter.`;
@@ -2801,6 +2974,66 @@ app.get('/api/stock-debug', async (req, res) => {
       } catch (e) { scanResult.oauth_stockItem_error = e.message; }
       return res.json(scanResult);
     }
+    // v6.4.1: category=<id> mode — return real products in the given category
+    // with live MSI stock. This is the "ultrareview" path that proves via the
+    // actual Magento call what's reachable through a category, independent of
+    // noisy keyword LIKE search.
+    if (req.query.category) {
+      const catId = String(req.query.category).trim();
+      const pageSize = Math.min(parseInt(req.query.pageSize, 10) || 50, 200);
+      const params = {
+        'searchCriteria[filter_groups][0][filters][0][field]': 'category_id',
+        'searchCriteria[filter_groups][0][filters][0][value]': catId,
+        'searchCriteria[filter_groups][0][filters][0][condition_type]': 'eq',
+        'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+        'searchCriteria[filter_groups][1][filters][0][value]': 1,
+        'searchCriteria[filter_groups][1][filters][0][condition_type]': 'eq',
+        'searchCriteria[pageSize]': pageSize
+      };
+      // Optional: attribute_set filter (e.g. 24 = Pickleball-Bags) for a tighter view.
+      if (req.query.attribute_set_id) {
+        params['searchCriteria[filter_groups][2][filters][0][field]'] = 'attribute_set_id';
+        params['searchCriteria[filter_groups][2][filters][0][value]'] = req.query.attribute_set_id;
+        params['searchCriteria[filter_groups][2][filters][0][condition_type]'] = 'eq';
+      }
+      try {
+        const result = await magentoGet('/products', params);
+        const items = result.items || [];
+        const skus = items.map(i => i.sku);
+        const stockMap = await fetchStockMap(skus);
+        const rows = items.map(i => {
+          const attrs = {};
+          (i.custom_attributes || []).forEach(a => { attrs[a.attribute_code] = a.value; });
+          const siQty = i.extension_attributes?.stock_item?.qty;
+          const siInStock = i.extension_attributes?.stock_item?.is_in_stock;
+          return {
+            sku: i.sku,
+            name: i.name,
+            type_id: i.type_id,
+            attribute_set_id: i.attribute_set_id,
+            status: i.status,
+            visibility: i.visibility,
+            price: i.price,
+            msi_qty: stockMap[i.sku] || 0,
+            stock_item_qty: siQty != null ? siQty : null,
+            stock_item_in_stock: siInStock != null ? siInStock : null,
+            url_key: attrs.url_key
+          };
+        });
+        const in_stock_count = rows.filter(r => r.msi_qty > 0 || r.stock_item_in_stock === true).length;
+        return res.json({
+          category_id: catId,
+          attribute_set_id: req.query.attribute_set_id || null,
+          total_count: result.total_count || items.length,
+          returned: items.length,
+          in_stock_count,
+          out_of_stock_count: items.length - in_stock_count,
+          items: rows
+        });
+      } catch (e) {
+        return res.status(500).json({ category_id: catId, error: e.message });
+      }
+    }
     // If a specific SKU is requested, do a deep stock analysis
     if (sku) {
       const deepResult = {};
@@ -2907,6 +3140,16 @@ app.listen(PORT, async () => {
   console.log(`[startup] Attribute cache ready.`);
   console.log(`[startup] Loading Magento category map...`);
   await initCategoryMap();
-  console.log(`[startup] Category map ready.\n`);
+  // v6.4.0: If Magento was cold or returned nothing, retry with backoff so we
+  // don't leave the service with CATEGORY_INDEX empty (breaks smart_product_search).
+  if (CATEGORY_MAP.length === 0) {
+    for (const delay of [2000, 5000, 15000]) {
+      console.log(`[startup] category map empty — retrying in ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+      await initCategoryMap();
+      if (CATEGORY_MAP.length > 0) break;
+    }
+  }
+  console.log(`[startup] Category map ready: ${CATEGORY_MAP.length} categories, ${Object.keys(CATEGORY_INDEX).length} index keys.\n`);
 });
 

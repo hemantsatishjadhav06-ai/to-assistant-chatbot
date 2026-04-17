@@ -70,6 +70,84 @@ Single source of truth for the TennisOutlet.in AI chatbot. Pick this up in any f
 
 ## 4. Debug Notes (fixes applied + playbook)
 
+**v6.4.1 (2026-04-18) — Real root cause: resolver stemming gap (CORRECTION to v6.4.0)**
+
+v6.4.0's framing was wrong. The user pushed back with a Magento admin screenshot showing Pickleball-Bags attribute set has 34 records and at least PIBG0021 (qty 5), PIBG0027 (4), PIBG0020 (3), PIBG0028 (3), PIBG0029 (3) are Simple Products with real stock. So the empty replies were NOT a true stockout — they were a retrieval miss.
+
+Actual root cause in `server.js`:
+- `buildCategoryIndex` indexed category-name tokens literally. "Pickleball Bags" → keys `pickleball`, `bags`, `pickleball bags`.
+- `resolveCategoriesFromQuery` did a literal lookup on user tokens. "pickle bag" tokenises to `pickle`, `bag` — neither is in the index.
+- Resolver returned `[]`. `smartProductSearch` fell back to `buildSearchParams` (LIKE `%pickle bag%` on name/sku/url_key). Product names are like "Engage Players Backpack" — substring misses everything.
+- End result: empty product array → agent says "we don't have any". Same shape for "any shoes" (singular "shoe" never matches "shoes").
+
+Fix (pure retrieval — no inventory dependency):
+- `_stemVariants(token)`: deterministic English-ish stemmer covering plural↔singular (bags↔bag, shoes↔shoe, balls↔ball, racquets↔racquet, accessories↔accessory).
+- `buildCategoryIndex`: each token is indexed together with its stem variants. Bigrams also index a singular-right variant ("pickleball bags" → also "pickleball bag").
+- `QUERY_SYNONYMS` map: `pickle→pickleball`, `padle/paddel/paddle→padel`, `racket→racquet`, `footwear/sneaker/trainer→shoes`, `kitbag/pouch/carrier/backpack/duffel→bag`.
+- `resolveCategoriesFromQuery`: each query token is synonym-resolved, then expanded to stem variants before bigram + unigram lookup. Cross-product over positions i and i+1 so bigrams reach all plural/singular forms.
+- Safety net: if the resolver still returns empty but the query contains a known product noun (bag/shoe/ball/racquet/grip/string/apparel/accessories) or a known sport (tennis/pickleball/padel), fall back to bare-token index lookup.
+- `/api/stock-debug?category=<id>[&attribute_set_id=<N>]`: new mode that pulls the real product list filtered by category via the Magento REST call `/products?searchCriteria[filter_groups][0][filters][0][field]=category_id` and merges live MSI stock per SKU. This is the "ultrareview" path — it answers "are PIBG* bags reachable + in stock?" independently of LIKE search.
+
+Unit-verified locally via `test-resolver.js` (vm-sandboxed server.js prefix with a synthetic catalog mirroring Tennis/Pickleball/Padel × Racquets/Shoes/Bags/Balls):
+- 22/22 assertions pass.
+- "pickle bag" → Pickleball Bags resolves as top-tier hit.
+- "any shoes" → all three Shoes categories resolve.
+- "tennis shoes size 10" → Tennis Shoes top hit.
+- "tennis balls" → Tennis Balls top hit (regression safe).
+- "racket" synonym → Tennis Racquets resolves.
+- "padle shoes" synonym → Padel Shoes resolves.
+- Bare "bag" / "shoe" → safety-net lookup returns the right categories.
+- Garbage query ("xyzabc qwerty") → empty (no false positives).
+
+What v6.4.0 got right and we kept:
+- `stripInternals` tagging `in_stock` / `availability` instead of dropping OOS rows.
+- `mergeAvailability` fallback tier (in-stock first, OOS fill).
+- Loosened `isProductAvailable` for configurables without loaded children.
+- Boot retry ladder + lazy `CATEGORY_INDEX` reload.
+- OOS-aware `PRODUCT_FORMAT` + specialist prompts in `agents.js`.
+These still ship as hardening — they're correct UX but they were never the root cause. The bug was upstream in the resolver.
+
+Pinecone / vector search:
+- Still not needed for this bug. The fix is ~60 lines of deterministic stemming + a 20-entry synonym map.
+- Phase 2 rationale intact: once catalog/query patterns exceed what a keyword index can cleanly cover, move to embeddings. Not today.
+
+---
+
+**v6.4.0 (2026-04-18) — "No output for pickle bag / any shoes" — SUPERSEDED BY v6.4.1**
+
+> NOTE: the diagnosis below was based on the `/api/stock-debug?q=...` (keyword LIKE) path, which returned noisy configurable parents with qty=0. That wasn't the real category inventory. Treat the "real stockout" claim as incorrect — see v6.4.1 above for the corrected diagnosis. The stripInternals/mergeAvailability/prompt changes still ship.
+
+Reported symptoms:
+- "pickle bag" → empty / "we don't have any" response.
+- "any shoes", "tennis shoes", "padel shoes", "pickleball shoes" → same empty response.
+
+Diagnosis via `/api/stock-debug`:
+- Tennis shoes (TSH*), pickleball shoes (PISH*), padel shoes (PDSH*): **every configurable's children are qty=0 in Magento MSI.** True stockout across the shoe catalog (248 products).
+- Pickleball bags (PIBG*): **all 8 configurables qty=0.** Real stockout.
+- Contrast check: tennis racquet bags TBG0143/TBG0206/TBG0207 **are** in stock (qty 2-4). So the retrieval pipeline itself is healthy.
+- Secondary finding: some configurables (e.g. PISH0008) report parent MSI qty>=1 but return empty children arrays, so the strict `_children_loaded` check in `isProductAvailable` was dropping them too.
+- Tertiary finding: `CATEGORY_INDEX` was occasionally empty at boot (Magento attribute cache fetch failing once, no retry).
+
+Root cause: the UX was "nothing to show" because `stripInternals` ran a hard `qty>=1` filter on every tool return, so when the whole category was sold out the LLM got `[]` and said "we don't have any" — reading as a broken chatbot.
+
+Fix (retrieval + prompt, not inventory):
+- `stripInternals` now *tags* products with `in_stock` / `availability` instead of dropping OOS.
+- New `mergeAvailability(tagged, pageSize)` returns in-stock first, then fills with up to 5 OOS items as a fallback tier when no in-stock exists, or up to 3 pre-slots when there's partial coverage.
+- Every consumer of `stripInternals` (searchProducts, getProductsByCategory, getRacquetsWithSpecs, getShoesWithSpecs, getBalls, smartProductSearch) was rewired to `applyPriceSizeFilters → sort (in-stock-first) → mergeAvailability`.
+- `getShoesWithSpecs` no longer hard-gates on `qty>=1`; sizes_available extraction preserved.
+- `isProductAvailable` loosened for configurables without loaded children — trust parent MSI qty.
+- Added lazy `CATEGORY_INDEX` reload (throttled 30s) + boot-time retry ladder for `initCategoryMap` (2s / 5s / 15s).
+- `agents.js` prompts updated (`PRODUCT_FORMAT` `STOCK / AVAILABILITY RULE` + per-specialist rules for shoe/racquet/catalog/availability): LLM must show sold-out products in normal format with a "currently sold out — tap to get notified" note instead of replying "we don't have any".
+
+Unit-verified locally:
+- `stripInternals` + `mergeAvailability` behave as designed across 4 fixture shapes (full-stock, partial-stock, 1-in-stock fallback, all-OOS fallback). `node -c` passes on both files.
+
+Pinecone / vector search:
+- **Not the blocker** for these two bugs. The root failure was inventory + a hard availability gate, not a retrieval-coverage issue.
+- Still useful as Phase 2 for synonym-heavy queries ("court shoes" → tennis shoes, "paddle carrier" → bags). Tracked in §9.
+
+---
+
 **Reported:** "which racquet can i buy" → returned Prince Championship *Balls*.
 - Repro: single-agent, system prompt mapped "best racquets" to category 338 (best-seller), which sorts balls first.
 - Root cause: category 338/434 are mixed best-seller buckets.
