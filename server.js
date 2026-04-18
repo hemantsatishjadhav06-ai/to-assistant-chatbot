@@ -1984,6 +1984,24 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
         p[`searchCriteria[filter_groups][${nextGroup}][filters][0][condition_type]`] = 'like';
         nextGroup++;
       }
+      // v6.7.9 TENNIS-ONLY in-stock pre-filter.
+      // Tennis has 227 TSH* configurable parents under cat 24. Sorted SKU
+      // ASC, the first ~60 (TSH0001..TSH0060) are legacy dead stock —
+      // every child qty=0 in MSI. ULTRA_CAP=60 never reaches live SKUs, so
+      // enrichment returns an empty pool and the bot answers "no tennis
+      // shoes in stock". Pickleball (11 PISH*) and padel fit inside the
+      // cap so they're not affected.
+      // Fix: ask Magento to drop out-of-stock parents server-side via the
+      // built-in `quantity_and_stock_status` attribute (1 = at least one
+      // child is salable). Shrinks the tennis candidate set from 227 to
+      // ~40-80, all of which now fit inside ULTRA_CAP=60 → enrichment
+      // sees live shoes. Pickleball/padel paths are NOT modified.
+      if (sportForQuery === 'tennis') {
+        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][field]`] = 'quantity_and_stock_status';
+        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][value]`] = 1;
+        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][condition_type]`] = 'eq';
+        nextGroup++;
+      }
       if (brandId) {
         p[`searchCriteria[filter_groups][${nextGroup}][filters][0][field]`] = 'brands';
         p[`searchCriteria[filter_groups][${nextGroup}][filters][0][value]`] = brandId;
