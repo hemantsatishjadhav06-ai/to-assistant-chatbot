@@ -499,6 +499,13 @@ ROUTING RULES (STRICT - follow these exactly):
 - COMPARISON / "compare X vs Y" / "difference between X and Y" / "X or Y, which is better" -> MUST call compare_products with queries=[productA, productB, ...] (2-6 items). The tool auto-resolves each product, filters qty>=1, and returns specs for a side-by-side answer. Use this for ALL product types (racquets, shoes, paddles, bags, balls). NEVER try to stitch together a comparison from multiple search_products calls — compare_products does it in one hop.
 - FALLBACK: If no rule above matches the product type, call search_products with the customer's keywords. NEVER refuse a product query without trying at least one Magento tool.
 
+EXACT-PRODUCT-NAME RULE (v6.7.13 — MUST OBEY, OVERRIDES ALL OTHER ROUTING WHEN A SPECIFIC PRODUCT IS NAMED):
+- When the customer's message names a SPECIFIC PRODUCT (brand + model + variant, e.g. "YONEX Poly Tour Fire 16L String Reel (200 m)", "Babolat Pure Drive 2024", "ASICS Solution Speed FF 4 size 10", "Solinco Hyper G 17"), you MUST call search_products with the EXACT product phrase as the query BEFORE any other tool. You may drop trailing bracketed sub-text like "(200 m)" or "- Black", but keep brand + model + key spec.
+- If search_products returns ANY item whose name contains the brand AND model the customer asked for, that product IS in stock — present it as the headline answer with its product_url and price. Do NOT recommend alternatives in place of the exact product the customer named.
+- Only after search_products returns ZERO items containing the brand + model (try the full phrase first, then a 2–3 word brand+model variant such as "YONEX Poly Tour Fire") may you say "we don't currently have that exact product" — and only then offer alternatives.
+- NEVER answer "we don't have it" / "not in stock" / "currently unavailable" for a specifically-named product based solely on the output of get_smart_products, get_products_by_category, or any category-browse tool. Those return a curated category slice and are NOT authoritative for a specific-name lookup. search_products is the only authoritative answer for a named product.
+- Conversational prefixes like "next", "also", "what about", "do you have", "is the X available" do NOT change this rule — strip the prefix and treat the remainder as a specific-name lookup.
+
 SMART GUIDELINES:
 - Beginner racquet -> get_racquets_with_specs({skill_level:"beginner"}) + add beginner advice (lighter, larger head size, forgiving).
 - Brand-specific racquet -> get_racquets_with_specs({brand:"Babolat"|"Head"|"Wilson"|"YONEX"|"Prince"...}).
@@ -1661,7 +1668,28 @@ async function searchProducts(query, pageSize = 10, { min_price = null, max_pric
     let pool = applyPriceSizeFilters(shaped, { min_price, max_price });
     const beforeCustomer = pool.length;
     const filtered_out = shaped.length - pool.length;
+    // v6.7.13: BOOST exact-product-name matches to the top of the result set.
+    // When the customer asks for a specific product (e.g. "YONEX Poly Tour
+    // Fire 16L String Reel (200 m)"), the LLM was sometimes ignoring the
+    // exact item and returning category-style alternatives because the named
+    // product wasn't in the first few results. We compute a per-item
+    // token-coverage score (fraction of query tokens that appear in the
+    // product name) and primary-sort by that score so the exact match lands
+    // at position 1 — physically impossible for the LLM to overlook.
+    const qTokens = String(query || '').toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(t => t.length >= 2 && !SEARCH_STOPWORDS.has(t));
+    const tokenScore = (p) => {
+      const name = String(p.name || '').toLowerCase();
+      if (!qTokens.length) return 0;
+      let hits = 0;
+      for (const t of qTokens) if (name.includes(t)) hits++;
+      return hits / qTokens.length;  // 0..1
+    };
     pool = pool.sort((a, b) => {
+      const sa = tokenScore(a), sb = tokenScore(b);
+      if (sa !== sb) return sb - sa;
       const aIn = ((a.qty || 0) >= 1 && isProductAvailable(a)) ? 1 : 0;
       const bIn = ((b.qty || 0) >= 1 && isProductAvailable(b)) ? 1 : 0;
       if (aIn !== bIn) return bIn - aIn;
@@ -3828,7 +3856,7 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'running',
     version: pkg.version,
-    code_build: '6.7.12',
+    code_build: '6.7.13',
     last_refresh: lastCatalogRefresh,
     categories_loaded: CATEGORY_MAP.length,
     category_index_keys: Object.keys(CATEGORY_INDEX).length,
