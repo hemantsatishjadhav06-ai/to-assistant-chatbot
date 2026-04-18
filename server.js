@@ -3596,6 +3596,67 @@ app.get('/api/debug/shoes-ultra', async (req, res) => {
   }
 });
 
+app.get('/api/debug/shoes-raw', async (req, res) => {
+  // v6.6.2: Per-category raw parent counts — pinpoints which subtree IDs
+  // return products vs. which are empty.
+  try {
+    const sport = String(req.query.sport || 'pickleball').toLowerCase();
+    const catId = SHOE_CATEGORIES[sport];
+    if (!catId) return res.status(400).json({ error: 'unknown sport', sport });
+    const subtree = expandCategorySubtree(catId);
+    const perCat = await Promise.allSettled(subtree.map(async (id) => {
+      const p = {
+        'searchCriteria[pageSize]': 5,
+        'fields': 'items[sku,name,type_id,status,visibility],total_count',
+        'searchCriteria[filter_groups][0][filters][0][field]': 'category_id',
+        'searchCriteria[filter_groups][0][filters][0][value]': id
+      };
+      const r = await magentoGet('/products', p);
+      return { cat_id: id, total: r.total_count, sample: (r.items||[]).map(i => ({ sku: i.sku, type_id: i.type_id, status: i.status, visibility: i.visibility })) };
+    }));
+    // Also call getShoesUltra's exact query for the whole subtree with filters
+    const rawParams = {
+      'searchCriteria[pageSize]': 200,
+      'fields': 'items[id,sku,name,type_id,status,visibility],total_count',
+      'searchCriteria[filter_groups][0][filters][0][field]': 'category_id',
+      'searchCriteria[filter_groups][0][filters][0][value]': subtree.join(','),
+      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+      'searchCriteria[filter_groups][1][filters][0][value]': 1,
+      'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
+      'searchCriteria[filter_groups][2][filters][0][value]': 4
+    };
+    if (subtree.length > 1) rawParams['searchCriteria[filter_groups][0][filters][0][condition_type]'] = 'in';
+    let ultraMirror = null;
+    try {
+      const r = await magentoGet('/products', rawParams);
+      ultraMirror = { total: r.total_count, returned: (r.items||[]).length, sample: (r.items||[]).slice(0,5).map(i => ({ sku: i.sku, type_id: i.type_id, status: i.status, visibility: i.visibility })) };
+    } catch (e) { ultraMirror = { error: e.response?.status, message: e.message }; }
+
+    // Same subtree without status/visibility filters
+    const noFilters = { ...rawParams };
+    delete noFilters['searchCriteria[filter_groups][1][filters][0][field]'];
+    delete noFilters['searchCriteria[filter_groups][1][filters][0][value]'];
+    delete noFilters['searchCriteria[filter_groups][2][filters][0][field]'];
+    delete noFilters['searchCriteria[filter_groups][2][filters][0][value]'];
+    let noFilterMirror = null;
+    try {
+      const r = await magentoGet('/products', noFilters);
+      noFilterMirror = { total: r.total_count, returned: (r.items||[]).length, sample: (r.items||[]).slice(0,5).map(i => ({ sku: i.sku, type_id: i.type_id, status: i.status, visibility: i.visibility })) };
+    } catch (e) { noFilterMirror = { error: e.response?.status, message: e.message }; }
+
+    res.json({
+      sport,
+      parent_id: catId,
+      subtree,
+      per_category: perCat.map(r => r.status === 'fulfilled' ? r.value : { error: r.reason?.message }),
+      ultra_mirror: ultraMirror,
+      subtree_no_status_visibility: noFilterMirror
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0,5) });
+  }
+});
+
 app.get('/api/stock-debug', async (req, res) => {
   const keyword = req.query.q || 'tennis racquet';
   const sport = req.query.sport || 'tennis';
