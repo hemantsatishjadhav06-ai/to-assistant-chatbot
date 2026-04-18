@@ -456,7 +456,7 @@ PRODUCT PRESENTATION RULES (MANDATORY ÃÂ¢ÃÂÃÂ NEVER SKIP):
 
 - The product_url is already in every product object the tool returns. Copy it exactly into the markdown link parentheses. The URL already points to the correct store (tennisoutlet.in, pickleballoutlet.in, or padeloutlet.in) based on the sport. Example: if the tool returns product_url: "https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html", write: **[Joola Hyperion Vision 16 mm - Storm Blue](https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html)**
 - If you list a product WITHOUT a clickable link, the response is BROKEN and unusable. Always include the link.
-- NEVER show quantity/stock numbers to the customer. Never print any "qty", "stock", "X in stock", "X left", or any count number.
+- NEVER show quantity/stock numbers to the customer in your final reply. Tools may return a qty field — use it ONLY for your internal ranking/filtering decisions; do not print it, do not mention "X in stock", "X left", or any count.
 - PRICE RULE (v6.7.5): Every product listing MUST show the LOW price only — the "price" field the tool returns is already the minimum price across variants. NEVER display "from", "starting at", price ranges, "₹X–₹Y", or both a low and a high price. Just the single low price, formatted ₹X,XXX.
 - IN-DEPTH ANALYSIS RULE (v6.7.5): When recommending any product (shoe, racquet, paddle, bag, balls, ball machine, apparel), write a rich "Coach's Take" that is SPECIFIC to the product — pull from its real spec fields (court_type, cushioning, width, shoe_type, shoe_weight, outsole, outer_material, inner_material, weight, head_size, balance, string_pattern, stiffness, made_in_country, short_description). Cover as relevant: (a) the ideal player/use case (beginner/intermediate/advanced, playing style, court surface), (b) key technology or construction feature that matters (e.g. FlyteFoam midsole, Twistra chassis, woven toe guard, carbon frame, cork grip), (c) one trade-off to set expectations (weight vs. stability, cushioning vs. court feel, power vs. control), (d) why this specific product beats its rivals in stock. Do NOT invent specs — if a field is null, omit it rather than guessing. Write 2–4 tight sentences per product, grounded only in the tool's data.
 - ONLY recommend products where in_stock is true. If a product has in_stock: false or qty: 0, SKIP it entirely ÃÂ¢ÃÂÃÂ do not mention it.
@@ -602,7 +602,7 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
     type: "function",
     function: {
       name: "get_shoes_ultra",
-      description: "NEW v6.5.0 — purpose-built shoe lookup that NEVER lies about size availability. Scans every shoe category (tennis 24, pickleball 253, padel 274) and all brand subcategories, loads configurable children + real MSI stock for each parent, parses shoe size from the LAST NUMBER in every child product name AND SKU suffix, and filters by qty >= 1. If a size is requested the tool only returns parents whose exact-size child is in stock; otherwise it returns every shoe with at least one in-stock size (with sizes_in_stock). Prefer this tool for ANY shoe query including size-specific asks like 'size 8 shoes' / 'any shoe in size 10'. Returns {products:[{name,sku,price,sizes_in_stock,has_requested_size,specs,short_description,...}], size_requested, size_available, message}. Price is ALWAYS the LOW price (min across variants). qty is NEVER returned — surface sizes_in_stock for availability.",
+      description: "NEW v6.5.0 — purpose-built shoe lookup that NEVER lies about size availability. Scans every shoe category (tennis 24, pickleball 253, padel 274) and all brand subcategories, loads configurable children + real MSI stock for each parent, parses shoe size from the LAST NUMBER in every child product name AND SKU suffix, and filters by qty >= 1. If a size is requested the tool only returns parents whose exact-size child is in stock; otherwise it returns every shoe with at least one in-stock size (with sizes_in_stock). Prefer this tool for ANY shoe query including size-specific asks like 'size 8 shoes' / 'any shoe in size 10'. Returns {products:[{name,sku,price,qty,sizes_in_stock,has_requested_size,specs,short_description,...}], size_requested, size_available, message}. Price is ALWAYS the LOW price (min across variants). qty IS returned for internal use — the customer-facing response MUST NOT print it.",
       parameters: {
         type: "object",
         properties: {
@@ -2172,12 +2172,17 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
     // Sort
     sizeGatedPool.sort((a, b) => (b.qty || 0) - (a.qty || 0));
 
-    // v6.7.5: customer-facing shape — RULE 1: only low price, RULE 2: no qty.
+    // v6.7.6: tool output re-adds qty for internal agent reasoning. RULE 1
+    // (low price only) still enforced at data layer. RULE 2 (no qty to customer)
+    // is now enforced ONLY in the customer-facing LLM system prompt — the final
+    // response must NOT print qty; intermediate agents may read it.
+    // RULE 3 (in-depth spec-grounded recs) still enforced via system prompt.
     const toOut = (p) => ({
       name: p.name,
       sku: p.sku,
       brand: p.brand || null,
       price: p.price || null, // LOW price (min of child prices) — no price_max exposed
+      qty: p.qty || 0, // internal use only — customer-facing LLM must NOT print
       in_stock: (p.qty || 0) >= 1,
       sport: p.sport || _sportForSku[p.sku] || 'tennis',
       product_url: p.product_url,
@@ -2185,7 +2190,6 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
       sizes_in_stock: p.sizes_in_stock || [],
       has_requested_size: !!p.has_requested_size,
       image: p.image || null,
-      // specs passthrough for in-depth recommendations (RULE 3)
       short_description: p.short_description || null,
       specs: p.specs || null,
       custom_attributes_relevant: p.custom_attributes_relevant || null
@@ -2909,6 +2913,7 @@ async function compareProducts({ queries = [], sport = null, min_price = null, m
         brand: pick.brand || null,
         price: pick.price || null,
         original_price: pick.original_price || null,
+        qty: pick.qty || 0,
         in_stock: true,
         sport: pick.sport || scopedSport,
         product_url: pick.product_url,
@@ -2935,7 +2940,7 @@ async function compareProducts({ queries = [], sport = null, min_price = null, m
         },
         // Alternatives if the LLM wants to mention a runner-up for this slot
         alternatives: prods.slice(1, 3).map(a => ({
-          name: a.name, sku: a.sku, price: a.price || null, product_url: a.product_url
+          name: a.name, sku: a.sku, price: a.price || null, qty: a.qty || 0, product_url: a.product_url
         }))
       };
       return row;
@@ -3968,7 +3973,7 @@ app.get('/api/debug/shoes-ultra', async (req, res) => {
       showing: result.showing,
       message: result.message,
       products: (result.products || []).map(p => ({
-        name: p.name, sku: p.sku, price: p.price,
+        name: p.name, sku: p.sku, price: p.price, qty: p.qty,
         sport: p.sport, in_stock: p.in_stock,
         sizes_in_stock: p.sizes_in_stock,
         has_requested_size: p.has_requested_size
