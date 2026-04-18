@@ -480,6 +480,7 @@ ROUTING RULES (STRICT - follow these exactly):
 - USED racquets -> get_products_by_category (90).
 - Sale/Wimbledon/Grand Slam offers -> get_products_by_category (292/349/437).
 - RACQUET UPGRADE / TRADE-IN / SELL OLD RACQUET -> Direct customer to: https://tennisoutlet.in/racquet-upgrade-program ÃÂ¢ÃÂÃÂ we purchase customer's old racquets through our Racquet Upgrade Program.
+- COMPARISON / "compare X vs Y" / "difference between X and Y" / "X or Y, which is better" -> MUST call compare_products with queries=[productA, productB, ...] (2-6 items). The tool auto-resolves each product, filters qty>=1, and returns specs for a side-by-side answer. Use this for ALL product types (racquets, shoes, paddles, bags, balls). NEVER try to stitch together a comparison from multiple search_products calls — compare_products does it in one hop.
 - FALLBACK: If no rule above matches the product type, call search_products with the customer's keywords. NEVER refuse a product query without trying at least one Magento tool.
 
 SMART GUIDELINES:
@@ -731,6 +732,29 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
           page_size: { type: "integer", default: 10 }
         },
         required: ["query"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "compare_products",
+      description: "v6.6.0 — Side-by-side in-stock comparison for 2-6 products. Pass one natural-language query per product (e.g. ['Babolat Pure Aero', 'Wilson Clash 100']). Each query is resolved via Magento catalog search, filtered to qty>=1, and returned with clean specs so the LLM can pick a winner like the best salesperson. Works for racquets, shoes, paddles, bags, balls — any catalog item.",
+      parameters: {
+        type: "object",
+        properties: {
+          queries: {
+            type: "array",
+            description: "2 to 6 natural-language product queries. One per product the customer wants compared.",
+            items: { type: "string" },
+            minItems: 2,
+            maxItems: 6
+          },
+          sport: { type: "string", enum: ["tennis","pickleball","padel"], description: "Optional sport scope. If omitted, inferred per query from the query text." },
+          min_price: { type: "number" },
+          max_price: { type: "number" }
+        },
+        required: ["queries"]
       }
     }
   }
@@ -1808,6 +1832,24 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
   }
 }
 
+// v6.6.0: Build a size-filter shopby URL that the LLM can surface to customers.
+// Pattern: https://{sport}outlet.in/shoes/shopby/{size}.html
+// When sport is 'all' or size is missing, fall back to the /shoes.html index.
+function buildShopbyUrl(sport, size) {
+  const sportKey = String(sport || 'tennis').toLowerCase();
+  const storeMap = {
+    tennis: 'https://tennisoutlet.in',
+    pickleball: 'https://pickleballoutlet.in',
+    padel: 'https://padeloutlet.in'
+  };
+  const base = storeMap[sportKey] || storeMap.tennis;
+  if (!size) return `${base}/shoes.html`;
+  // Sanitize size for URL path
+  const sz = String(size).trim().replace(/[^\d.]/g, '');
+  if (!sz) return `${base}/shoes.html`;
+  return `${base}/shoes/shopby/${sz}.html`;
+}
+
 // ==================== SHOES ULTRA (v6.5.0) ====================
 // Purpose-built shoe lookup that NEVER lies about size availability.
 // - Expands full category subtree for every shoe category (tennis 24, pickleball 253, padel 274)
@@ -1865,10 +1907,21 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
       const { s, r } = cr.value;
       for (const item of (r.items || [])) {
         if (!item.sku || seen.has(item.sku)) continue;
-        // Sport-lock via SKU prefix (unless scanning all sports — allowed to mix)
+        // SOFT sport-lock: only drop if SKU prefix clearly says ANOTHER sport.
+        // If detectSportFromProduct returns the expected sport OR the fallback
+        // (meaning SKU didn't encode a sport), keep the item — the category
+        // itself is the truth.
         if (sportKey !== 'all') {
-          const itemSport = detectSportFromProduct(item, s);
-          if (itemSport !== s) continue;
+          const sku = String(item.sku || '').toUpperCase();
+          const isTennisSku = /^TSH|^TBG|^TBL|^TRA|^TST|^TAC|^TCL/.test(sku);
+          const isPickleSku = /^PISH|^PIBG|^PIBL|^PIPD|^PIAC|^PINP/.test(sku);
+          const isPadelSku = /^PDSH|^PDBG|^PDBL|^PDRA|^PDAC/.test(sku);
+          const wrong = (
+            (sportKey === 'tennis' && (isPickleSku || isPadelSku)) ||
+            (sportKey === 'pickleball' && (isTennisSku || isPadelSku)) ||
+            (sportKey === 'padel' && (isTennisSku || isPickleSku))
+          );
+          if (wrong) continue;
         }
         seen.add(item.sku);
         _sportForSku[item.sku] = s;
@@ -2026,8 +2079,10 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
           .slice(0, page_size);
         const altOut = alt.map(a => toOut(a.p));
         message = `NO size ${wantSize} ${sportKey === 'all' ? '' : sportKey + ' '}shoes are in stock. Showing ${altOut.length} closest-size alternatives. LLM MUST: (1) Tell the customer plainly "We don't have size ${wantSize} in stock right now." (2) List these alternatives with their actual available sizes (see sizes_in_stock for each product). (3) NEVER tell the customer to check the product page for sizes — sizes_in_stock is the source of truth.`;
+        const shopby = buildShopbyUrl(sportKey, wantSize);
         return {
           customer_query: { sport: sportKey, size: wantSize, brand },
+          shopby_url: shopby,
           products: altOut,
           total: pool.length,
           showing: altOut.length,
@@ -2040,8 +2095,10 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
       message = `Showing ${outSized.length} ${sportKey === 'all' ? '' : sportKey + ' '}shoe(s) in stock.`;
     }
 
+    const shopby = buildShopbyUrl(sportKey, wantSize);
     return {
       customer_query: { sport: sportKey, size: wantSize, brand },
+      shopby_url: shopby,
       products: outSized,
       total: sizeGatedPool.length,
       showing: outSized.length,
@@ -2657,6 +2714,123 @@ async function smartProductSearch({ query, sport = 'tennis', min_price = null, m
   };
 }
 
+// ==================== COMPARE PRODUCTS (v6.6.0) ====================
+// Salesperson-grade product comparison. For each query string:
+//   1. Run smartProductSearch to resolve it into a ranked in-stock product list
+//   2. Take the top in-stock hit (qty >= 1) for that query — the "match"
+//   3. Pull clean specs from attrs + configurable metadata
+// Returns a single structured block the ComparisonAgent can turn into a
+// side-by-side table + a clear "winner" call. NEVER invents products or
+// specs — if Magento has no match with qty >= 1, the slot is marked missing.
+async function compareProducts({ queries = [], sport = null, min_price = null, max_price = null } = {}) {
+  const qList = (Array.isArray(queries) ? queries : [])
+    .map(q => String(q || '').trim())
+    .filter(Boolean)
+    .slice(0, 6);
+
+  if (qList.length === 0) {
+    return { error: true, message: 'compare_products requires at least 1 query string.' };
+  }
+
+  // Resolve each query in parallel — each result is the top in-stock shaped product
+  const perQuery = await Promise.all(qList.map(async (q) => {
+    const qLower = q.toLowerCase();
+    let scopedSport = sport;
+    if (!scopedSport) {
+      if (qLower.includes('padel')) scopedSport = 'padel';
+      else if (qLower.includes('pickle')) scopedSport = 'pickleball';
+      else scopedSport = 'tennis';
+    }
+    try {
+      const r = await smartProductSearch({ query: q, sport: scopedSport, min_price, max_price, page_size: 6 });
+      const prods = (r.products || []).filter(p => (p.qty || 0) >= 1 && isProductAvailable(p));
+      if (prods.length === 0) {
+        return { query: q, found: false, candidates_total: (r.products || []).length, message: 'No in-stock match.' };
+      }
+      const pick = prods[0];
+      const specs = pick.specs || {};
+      const row = {
+        query: q,
+        found: true,
+        name: pick.name,
+        sku: pick.sku,
+        brand: pick.brand || null,
+        price: pick.price || null,
+        original_price: pick.original_price || null,
+        qty: pick.qty || 0,
+        in_stock: true,
+        sport: pick.sport || scopedSport,
+        product_url: pick.product_url,
+        image: pick.image || null,
+        short_description: pick.short_description || null,
+        specs: {
+          // shoes
+          court_type: specs.court_type || null,
+          cushioning: specs.cushioning || null,
+          width: specs.width || null,
+          shoe_type: specs.shoe_type || null,
+          shoe_weight: specs.shoe_weight || null,
+          outsole: specs.outsole || null,
+          outer_material: specs.outer_material || null,
+          inner_material: specs.inner_material || null,
+          available_sizes: specs.available_sizes || null,
+          // racquets / paddles (may be on root attrs — pull from short_description if needed)
+          weight: specs.weight || null,
+          head_size: specs.head_size || null,
+          balance: specs.balance || null,
+          string_pattern: specs.string_pattern || null,
+          stiffness: specs.stiffness || null,
+          made_in_country: specs.made_in_country || null
+        },
+        // Alternatives if the LLM wants to mention a runner-up for this slot
+        alternatives: prods.slice(1, 3).map(a => ({
+          name: a.name, sku: a.sku, price: a.price || null, qty: a.qty || 0, product_url: a.product_url
+        }))
+      };
+      return row;
+    } catch (err) {
+      return { query: q, found: false, error: err.message || String(err) };
+    }
+  }));
+
+  const found = perQuery.filter(r => r.found);
+  const missing = perQuery.filter(r => !r.found);
+  const allSameSport = found.length > 0 && found.every(r => r.sport === found[0].sport);
+
+  // Build a lightweight comparison matrix that the LLM can render as a table.
+  // Only include keys where at least one product has a value.
+  const SPEC_KEYS = [
+    'price', 'brand', 'sport',
+    'court_type', 'cushioning', 'width', 'shoe_type', 'shoe_weight', 'outsole', 'outer_material', 'available_sizes',
+    'weight', 'head_size', 'balance', 'string_pattern', 'stiffness',
+    'qty'
+  ];
+  const matrix = {};
+  for (const key of SPEC_KEYS) {
+    const vals = found.map(r => {
+      if (key === 'price' || key === 'qty' || key === 'brand' || key === 'sport') return r[key];
+      return r.specs ? r.specs[key] : null;
+    });
+    if (vals.some(v => v !== null && v !== undefined && v !== '' && !(Array.isArray(v) && v.length === 0))) {
+      matrix[key] = vals;
+    }
+  }
+
+  return {
+    customer_request: { queries: qList, sport },
+    products: perQuery,
+    matrix,
+    in_stock_count: found.length,
+    missing_count: missing.length,
+    all_same_sport: allSameSport,
+    message: found.length === 0
+      ? `None of the ${qList.length} requested product(s) are currently in stock. LLM MUST tell the customer plainly, not invent products.`
+      : (missing.length > 0
+          ? `${found.length} of ${qList.length} found in stock. LLM should mention which query had no match and offer alternatives if useful.`
+          : `All ${found.length} products resolved — present a side-by-side comparison and pick a winner using the customer's likely use case.`)
+  };
+}
+
 // ==================== EXECUTE ====================
 async function executeFunction(name, args, sport = 'tennis') {
   switch (name) {
@@ -2696,6 +2870,7 @@ async function executeFunction(name, args, sport = 'tennis') {
     case 'list_categories': return { categories: listAllCategories(args || {}) };
     case 'get_product_reviews': return await getProductReviews(args || {});
     case 'smart_product_search': return await smartProductSearch({ ...(args || {}), sport: args?.sport || sport });
+    case 'compare_products': return await compareProducts({ ...(args || {}), sport: args?.sport || sport });
     default: return { error: true, message: `Unknown function: ${name}` };
   }
 }
@@ -2708,6 +2883,10 @@ async function executeFunction(name, args, sport = 'tennis') {
 // No extra LLM round-trip ÃÂ¢ÃÂÃÂ pure regex/keyword scoring, so latency stays flat.
 const INTENT_RULES = [
   // intent,            patterns (match any),                                     forceTool,                                        hint
+  // v6.6.0: Comparison intent wins over product-type intents — "compare X vs Y" / "X or Y?" / "difference between X and Y"
+  { intent: 'comparison',
+    rx: [/\bcompare\b/i, /\bvs\.?\b/i, /\bversus\b/i, /\bdifference\s+between\b/i, /\bside\s*by\s*side\b/i, /which\s+is\s+better/i, /\bor\b.*\?$/i],
+    force: null },
   // v6.1.5: Sport-specific shoe intents BEFORE generic shoe — more specific wins
   { intent: 'padel_shoe',
     rx: [/\bpadel\b.*(shoe|shoes|footwear|sneaker)/i, /(shoe|shoes|footwear|sneaker).*\bpadel\b/i],
