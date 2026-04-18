@@ -27,6 +27,17 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
+// v6.7.0 (Patch 9): stricter per-IP limiter for chat endpoints to protect Magento/OpenRouter budgets
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many chat requests. Please slow down and try again in a minute.' }
+});
+app.use('/api/chat', chatLimiter);
+app.use('/api/chat-agents', chatLimiter);
+
 // ==================== CONFIG ====================
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openai/gpt-4o';
@@ -1123,16 +1134,27 @@ function brandNameToId(name) {
 }
 
 // ==================== MAGENTO BEARER API (catalog) ====================
-async function magentoGet(endpoint, params = {}) {
-  const response = await axios.get(`${MAGENTO_REST}${endpoint}`, {
-    headers: {
-      'Authorization': `Bearer ${MAGENTO_TOKEN}`,
-      'Accept': 'application/json'
-    },
-    params,
-    timeout: 10000   // v5.7.2: balanced ÃÂ¢ÃÂÃÂ generous but fits Render 30s
-  });
-  return response.data;
+async function magentoGet(endpoint, params = {}, attempt = 0) {
+  try {
+    const response = await axios.get(`${MAGENTO_REST}${endpoint}`, {
+      headers: {
+        'Authorization': `Bearer ${MAGENTO_TOKEN}`,
+        'Accept': 'application/json'
+      },
+      params,
+      timeout: 10000
+    });
+    return response.data;
+  } catch (err) {
+    const status = err.response?.status;
+    // v6.7.0 (Patch 8): retry once on transient 5xx / 429 with small jitter
+    if (attempt < 1 && (status === 429 || (status >= 500 && status <= 599))) {
+      const delay = 300 + Math.floor(Math.random() * 400);
+      await new Promise(r => setTimeout(r, delay));
+      return magentoGet(endpoint, params, attempt + 1);
+    }
+    throw err;
+  }
 }
 
 // ==================== OAUTH 1.0a (orders) ====================
@@ -1256,7 +1278,42 @@ async function getOrderStatus(orderId) {
 // triggers undefined behavior in M2 REST (silently returns empty or partial results).
 // Works on MSI, legacy cataloginventory, single-source, multi-source ÃÂ¢ÃÂÃÂ every variant.
 // Returns: { [sku]: qty } where qty >= 1 means "customer can buy this right now".
+// v6.7.0 (Patch 10): 60s in-memory SKU qty cache to cut Magento traffic during bursts
+const STOCK_CACHE = new Map(); // sku -> { qty, t }
+const STOCK_TTL_MS = 60 * 1000;
+
 async function fetchStockMap(skus) {
+  const map = {};
+  if (!skus || skus.length === 0) return map;
+  const now = Date.now();
+  // Serve cache hits directly
+  const missing = [];
+  for (const s of [...new Set((skus || []).filter(x => x && typeof x === 'string'))]) {
+    const hit = STOCK_CACHE.get(s);
+    if (hit && (now - hit.t) < STOCK_TTL_MS) {
+      map[s] = hit.qty;
+    } else {
+      missing.push(s);
+    }
+  }
+  if (missing.length === 0) return map;
+  // Delegate to the real fetcher for missing SKUs, then merge and populate cache
+  const fresh = await _fetchStockMapLive(missing);
+  for (const [k, v] of Object.entries(fresh)) {
+    map[k] = v;
+    STOCK_CACHE.set(k, { qty: v, t: now });
+  }
+  // Also cache the zero-returns so we don't re-hammer
+  for (const s of missing) {
+    if (!(s in fresh)) {
+      map[s] = 0;
+      STOCK_CACHE.set(s, { qty: 0, t: now });
+    }
+  }
+  return map;
+}
+
+async function _fetchStockMapLive(skus) {
   const map = {};
   if (!skus || skus.length === 0) return map;
 
@@ -1294,10 +1351,13 @@ async function fetchStockMap(skus) {
         } else { throw oauthErr; }
       }
       for (const it of (res?.items || [])) {
-        // status=1 means source-item is enabled; don't count disabled warehouses.
-        if (it.status === 0) continue;
+        // v6.7.0 (Patch 2): count by quantity>0, not by source-item admin status.
+        // The admin `status` flag toggles MSI grid visibility, it does NOT mean
+        // the warehouse is inactive. Counting by qty is the source of truth.
+        const q = parseFloat(it.quantity || 0);
+        if (q <= 0) continue;
         const s = it.sku;
-        map[s] = (map[s] || 0) + parseFloat(it.quantity || 0);
+        map[s] = (map[s] || 0) + q;
       }
     } catch (e) {
       console.log(`[stockMap] MSI batch failed (${batch.length}):`, e.response?.status || e.message);
@@ -1316,35 +1376,42 @@ async function fetchStockMap(skus) {
     })
   );
 
-  // If EVERY SKU came back zero, the store likely runs legacy cataloginventory
-  // (MSI not enabled or not populated). Fall back to /stockItems/{sku}
-  // which works on both. This is Magento's own storefront check.
-  const allZero = uniqueSkus.every(s => !map[s] || map[s] === 0);
-  if (allZero) {
-    console.log(`[stockMap] MSI empty ÃÂ¢ÃÂÃÂ falling back to /stockItems for ${uniqueSkus.length} SKUs`);
-    const CAP = 50;
-    const subset = uniqueSkus.slice(0, CAP);
-    await Promise.all(subset.map(async (sku) => {
-      try {
-        // /V1/stockItems/{sku} works with bearer on most installs and
-        // returns the salable qty Magento uses on the storefront.
-        const si = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`);
-        const qty = parseFloat(si?.qty || 0);
-        const inStock = si?.is_in_stock === true;
-        if (inStock && qty > 0) map[sku] = qty;
-        else if (inStock && qty === 0) map[sku] = 1; // in-stock but no managed qty (backorder allowed)
-      } catch (err) {
-        // Last-ditch via OAuth if bearer 401'd
-        if (err.response?.status === 401) {
-          try {
-            const si = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`);
-            const qty = parseFloat(si?.qty || 0);
-            if (si?.is_in_stock && qty > 0) map[sku] = qty;
-            else if (si?.is_in_stock) map[sku] = 1;
-          } catch { /* give up silently for this SKU */ }
+  // v6.7.0 (Patch 3): per-SKU /stockItems fallback for EVERY SKU not resolved by MSI.
+  // Previously: only ran if ALL were zero, capped at 50. A handful of MSI hits
+  // masked the other 300 unresolved SKUs. Now: any SKU with map[sku]===undefined
+  // gets a /stockItems call with bounded concurrency 8. No global cap.
+  const unresolved = uniqueSkus.filter(s => map[s] === undefined);
+  if (unresolved.length > 0) {
+    console.log(`[stockMap] /stockItems per-SKU fallback for ${unresolved.length} unresolved SKUs`);
+    const CONC_SI = 8;
+    const q = [...unresolved];
+    const worker = async () => {
+      while (q.length) {
+        const sku = q.shift();
+        if (!sku) break;
+        try {
+          const si = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`);
+          const qty = parseFloat(si?.qty || 0);
+          const inStock = si?.is_in_stock === true;
+          if (inStock && qty > 0) map[sku] = qty;
+          else if (inStock) map[sku] = 1; // in-stock, managed qty unknown
+          else map[sku] = 0;
+        } catch (err) {
+          if (err.response?.status === 401) {
+            try {
+              const si = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`);
+              const qty = parseFloat(si?.qty || 0);
+              if (si?.is_in_stock && qty > 0) map[sku] = qty;
+              else if (si?.is_in_stock) map[sku] = 1;
+              else map[sku] = 0;
+            } catch { map[sku] = 0; }
+          } else {
+            map[sku] = 0;
+          }
         }
       }
-    }));
+    };
+    await Promise.all(Array.from({ length: Math.min(CONC_SI, unresolved.length) }, worker));
   }
 
   return map;
@@ -1963,14 +2030,23 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
         // Stock (MSI)
         const childSkus = children.map(c => c.sku);
         const stockMap = await fetchStockMap(childSkus);
-        // Build child rows with authoritative size (last number in child NAME first, then SKU suffix fallback)
+        // v6.7.0 (Patch 4): hyphen-split size parser. Size is the last segment
+        // after the final hyphen / en-dash / em-dash in the child NAME. Falls
+        // back to SKU suffix. Fixes names like "Saba Blue & White-7" where
+        // the previous regex [\d]+$ would return null because of trailing
+        // whitespace or non-digit trim artifacts.
+        const parseSize = (name, sku) => {
+          const n = String(name || '').trim();
+          // Split on hyphen, en-dash (\u2013), em-dash (\u2014)
+          const parts = n.split(/[-\u2013\u2014]/);
+          const last = (parts[parts.length - 1] || '').trim();
+          const m = last.match(/^([\d]+(?:\.[\d]+)?)/);
+          if (m) return m[1];
+          const sTail = String(sku || '').match(/-([\d]+(?:\.[\d]+)?)$/);
+          return sTail ? sTail[1] : null;
+        };
         const kids = children.map(c => {
-          const nameSizeMatch = String(c.name || '').match(/([\d]+(?:\.[\d]+)?)\s*$/);
-          let sizeStr = nameSizeMatch ? nameSizeMatch[1] : null;
-          if (!sizeStr) {
-            const skuTail = String(c.sku || '').match(/-([\d]+(?:\.[\d]+)?)$/);
-            if (skuTail) sizeStr = skuTail[1];
-          }
+          const sizeStr = parseSize(c.name, c.sku);
           const qty = parseFloat(stockMap[c.sku] || 0);
           return {
             sku: c.sku,
@@ -3002,7 +3078,7 @@ app.post('/api/chat', async (req, res) => {
         role: 'system',
         content: `SIZE QUERY DETECTED: The customer asked about ${sport} shoes with a specific size. You MUST immediately call get_products_by_category with category_id=${catId} and page_size=5. After listing the products, append: "All sizes (including the size you mentioned) can be selected on each product page. If a specific size is sold out, it will be marked on that page." NEVER say "we don't have that size".`
       };
-      forceToolChoice = { type: 'function', function: { name: 'get_products_by_category' } };
+      // v6.7.0 (Patch 1): removed forceToolChoice pin for shoe+size — let router pick get_shoes_ultra
     } else if (mentionsSize && /racquet|racket|grip/i.test(lowerUser)) {
       sizeDirective = {
         role: 'system',
@@ -3030,34 +3106,41 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    // v6.2.1: SPORT CLARIFICATION GATE — if the query is a generic shoe/ball/racquet
-    // request with no sport anywhere in recent context, don't guess. Ask first. This
-    // prevents the bot from dumping the wrong sport's catalogue or defaulting to tennis
-    // when the customer meant pickleball/padel.
+    // v6.7.0 (Patch 5): SPORT CLARIFICATION — PROBE-AND-ASK, DO NOT HARD-BLOCK.
+    // Previously: bare shoe/ball/racquet intent with no sport returned an early
+    // text-only reply asking "which sport?" and no products. Now: inject
+    // sport='all' so the tool call returns merged results across sports AND add
+    // an ambiguity directive that tells the LLM to (a) show the merged results,
+    // (b) ask which sport the customer meant as part of the SAME turn. The
+    // customer gets product options AND the clarifying question together.
     const AMBIGUOUS_GENERIC_INTENTS = new Set(['shoe', 'ball', 'racquet']);
+    let ambiguityDirective = null;
     if (
       classification.top &&
       AMBIGUOUS_GENERIC_INTENTS.has(classification.top.intent) &&
-      !classification.top.hintArgs?.sport
+      !classification.top.hintArgs?.sport &&
+      !detectedSportForTurn
     ) {
+      if (!classification.top.hintArgs) classification.top.hintArgs = {};
+      classification.top.hintArgs.sport = 'all';
       const nounMap = { shoe: 'shoes', ball: 'balls', racquet: 'racquet or paddle' };
       const noun = nounMap[classification.top.intent] || classification.top.intent;
-      const clarifyingReply =
-        `Happy to help you find the right ${noun}! Which sport are you shopping for — ` +
-        `tennis, pickleball, or padel? Once you tell me, I'll pull the in-stock options ` +
-        `for that sport.`;
+      ambiguityDirective = {
+        role: 'system',
+        content:
+          `AMBIGUOUS SPORT: The customer asked about ${noun} without naming a sport. ` +
+          `The tool call will return merged results across tennis, pickleball, and padel. ` +
+          `In your reply: (1) show the top 2-3 in-stock options from the results grouped by sport; ` +
+          `(2) close with "Were you shopping for tennis, pickleball, or padel? I can narrow it down once I know." ` +
+          `Do NOT return a plain-text-only reply — customers want to see options AND be asked the clarifying question.`
+      };
       pushTrace({
         user: lastUser,
         intent: classification.top.intent,
         entities: classification.entities || {},
         forced: null,
         iterations: 0,
-        action: 'sport_clarification'
-      });
-      return res.json({
-        message: clarifyingReply,
-        intent: classification.top.intent,
-        action: 'sport_clarification'
+        action: 'sport_clarification_probe'
       });
     }
 
@@ -3091,6 +3174,7 @@ app.post('/api/chat', async (req, res) => {
     const systemParts = [{ role: 'system', content: SYSTEM_PROMPT }];
     if (sizeDirective) systemParts.push(sizeDirective);
     if (agentHint) systemParts.push(agentHint);
+    if (ambiguityDirective) systemParts.push(ambiguityDirective);
     if (coachingDirective) systemParts.push(coachingDirective);
     const apiMessages = [...systemParts, ...messages];
 
@@ -3099,8 +3183,8 @@ app.post('/api/chat', async (req, res) => {
       messages: apiMessages,
       tools: FUNCTION_DEFINITIONS,
       tool_choice: forceToolChoice,
-      temperature: 0.7,
-      max_tokens: 1800
+      temperature: 0.2,
+      max_tokens: 3000
     }, {
       headers: {
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
@@ -3115,7 +3199,7 @@ app.post('/api/chat', async (req, res) => {
     let iterations = 0;
     const conversation = [...apiMessages];
 
-    while (assistantMessage.tool_calls && iterations < 3) {
+    while (assistantMessage.tool_calls && iterations < 6) {
       iterations++;
       conversation.push(assistantMessage);
       const toolResults = [];
@@ -3129,7 +3213,7 @@ app.post('/api/chat', async (req, res) => {
           Object.assign(funcArgs, classification.top.hintArgs);
         }
         console.log(`[Call] ${funcName}(${JSON.stringify(funcArgs)})`);
-        const result = await executeFunction(funcName, funcArgs);
+        const result = await executeFunction(funcName, funcArgs, detectedSportForTurn || 'tennis');
         console.log(`[Result] ${funcName}: ${JSON.stringify(result).substring(0, 200)}...`);
         toolResults.push({
           role: 'tool',
