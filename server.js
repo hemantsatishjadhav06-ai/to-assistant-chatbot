@@ -471,7 +471,7 @@ CROSS-SPORT HARD RULES (v6.3.0 — NEVER VIOLATE):
 
 ROUTING RULES (STRICT - follow these exactly):
 - ANY query about RACQUETS / RACKETS / PADDLES (tennis racquet, padel racket, pickleball paddle, paddleball paddle, brand-specific) -> MUST call get_racquets_with_specs with the correct sport (tennis/padel/pickleball). If the customer didn't specify a sport and none is in conversation history, ASK FIRST (see SPORT CLARIFICATION above). NEVER use get_products_by_category for racquets. NEVER use best-seller categories (338/434).
-- ANY query about SHOES / FOOTWEAR -> MUST call get_shoes_with_specs (never get_products_by_category for shoes). If the sport is not specified and not in history, ASK FIRST.
+- ANY query about SHOES / FOOTWEAR -> MUST call get_shoes_ultra (v6.5 — dedicated shoe tool). NEVER use get_products_by_category or get_shoes_with_specs for shoes. Pass the sport ('tennis'/'pickleball'/'padel') or 'all' if unknown, and pass size verbatim when the customer mentioned one.
 - ANY query about BRANDS carried by the store -> call list_brands.
 - BALLS -> get_balls. Pass sport='tennis' for tennis balls, sport='pickleball' for pickleball balls, sport='padel' for padel balls. If the customer just says 'balls' (no sport) AND no sport is in conversation history, ASK FIRST rather than calling the tool. Only products with real quantity >= 1 are returned. NEVER use get_products_by_category for balls.
 - STRINGS -> get_products_by_category (29).
@@ -491,14 +491,14 @@ SMART GUIDELINES:
 
 SIZE / SIZE-SPECIFIC REQUESTS (CRITICAL - READ CAREFULLY):
 - Shoe size is encoded as the LAST NUMBER in the product name (e.g. "Asics Gel Resolution 9 - 10" = size 10; "Nike Vapor Pro 11.5" = size 11.5). Every shoe product name ends with its size.
-- When a customer asks for shoes in size X: call get_shoes_with_specs with the customer's sport (tennis / pickleball / padel) AND size=X. NEVER pass sport="all" unless the customer explicitly asked for all sports.
+- When a customer asks for shoes in size X: call get_shoes_ultra with sport and size=X. The tool response tells you size_available (boolean). Trust size_available and each product's sizes_in_stock — do NOT claim a size is unavailable if sizes_in_stock lists it.
 - After the tool returns, YOU must filter the products list: read the LAST NUMBER in each product name and only present the shoes whose trailing number equals the requested size.
 - If one or more products match size X: present those products only, with their clickable links, and a short note: "Here are the size X shoes we have in stock."
 - If NO products in the returned list match size X: tell the customer PLAINLY: "We don't have size X [sport] shoes in stock right now." Then look at the trailing numbers in the returned product names, pick the 2-3 closest available sizes, and offer them by name ("We do have these in size 9 and size 10: <product A>, <product B>").
 - NEVER say "check size availability on the product page". NEVER say "you can select size on each product page". NEVER tell the customer to go hunt for their size on the website - that is the whole reason they are chatting with you.
 - NEVER mix sports. If the customer asked for tennis shoes, do not show padel or pickleball shoes, even if the padel/pickleball shoes happen to be in the requested size.
 - The tool response includes a "customer_query" object that echoes what you asked for - use it to stay grounded on sport and size.
-- For shoe queries WITHOUT a size: call get_shoes_with_specs normally, show 4-5 products, and you do NOT need to filter by size.
+- For shoe queries WITHOUT a size: call get_shoes_ultra normally, show 4-5 products, and you do NOT need to filter by size.
 - If the customer says "sports shoes" or just "shoes" without specifying tennis/pickleball/padel, ONLY THEN pass sport="all".
 - Same size-from-name logic applies to apparel sizes (S/M/L/XL) and racquet grip sizes when present in product names.
 
@@ -577,6 +577,24 @@ BRAND LINES: Pure Aero(44), Pure Drive(45), Pro Staff(50), Blade(52), Speed(57),
           min_price: { type: "number", description: "Optional minimum price in INR." },
           max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand before calling: '5K'->5000, '1L'->100000, 'under 8000'->8000." },
           page_size: { type: "integer", default: 10 }
+        }
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_shoes_ultra",
+      description: "NEW v6.5.0 — purpose-built shoe lookup that NEVER lies about size availability. Scans every shoe category (tennis 24, pickleball 253, padel 274) and all brand subcategories, loads configurable children + real MSI stock for each parent, parses shoe size from the LAST NUMBER in every child product name AND SKU suffix, and filters by qty >= 1. If a size is requested the tool only returns parents whose exact-size child is in stock; otherwise it returns every shoe with at least one in-stock size (with sizes_in_stock). Prefer this tool for ANY shoe query including size-specific asks like 'size 8 shoes' / 'any shoe in size 10'. Returns {products:[{name,sku,price,qty,sizes_in_stock,has_requested_size,...}], size_requested, size_available, message}.",
+      parameters: {
+        type: "object",
+        properties: {
+          sport: { type: "string", enum: ["tennis", "pickleball", "padel", "all"], default: "all", description: "Which sport's shoe catalog to scan. Use 'all' when the customer did not specify a sport." },
+          brand: { type: "string", description: "Optional brand name (ASICS, Nike, Adidas, Yonex, Babolat, Joma, Hundred)." },
+          size: { type: "string", description: "The customer's shoe size (e.g. '8', '10', '9.5'). Pass exactly what the customer said. Omit if no size mentioned." },
+          min_price: { type: "number", description: "Optional minimum price in INR." },
+          max_price: { type: "number", description: "Optional maximum price in INR. Convert shorthand: '5K'->5000, '1L'->100000." },
+          page_size: { type: "integer", default: 10, description: "Max products to return (1-20)." }
         }
       }
     }
@@ -1790,6 +1808,254 @@ async function getShoesWithSpecs({ sport = 'tennis', brand = null, shoe_type = n
   }
 }
 
+// ==================== SHOES ULTRA (v6.5.0) ====================
+// Purpose-built shoe lookup that NEVER lies about size availability.
+// - Expands full category subtree for every shoe category (tennis 24, pickleball 253, padel 274)
+// - Uses condition_type=in to search the whole subtree in a single query
+// - SKU-prefix sport-lock so category cross-listing cannot leak wrong-sport shoes
+// - Fetches configurable-children + MSI stock per parent in parallel (higher CAP than legacy)
+// - Parses size from the LAST NUMBER in each child's product name AND SKU suffix — authoritative
+// - Filters children by qty >= 1. A parent only surfaces if it has >= 1 size in real stock.
+// - If the customer asks for size X, a parent only surfaces if its size-X child has qty >= 1.
+// - Never claims "no size X" unless the subtree fetch actually returned zero size-X matches.
+async function getShoesUltra({ sport = 'all', brand = null, size = null, min_price = null, max_price = null, page_size = 10 } = {}) {
+  try {
+    const sportKey = String(sport || 'all').toLowerCase();
+    const wantSize = size != null ? String(size).trim() : null;
+    const wantSizeNum = wantSize ? parseFloat(String(wantSize).match(/[\d.]+/)?.[0] || '') : null;
+    const minPrice = min_price != null && isFinite(parseFloat(min_price)) ? parseFloat(min_price) : null;
+    const maxPrice = max_price != null && isFinite(parseFloat(max_price)) ? parseFloat(max_price) : null;
+    const brandId = brand ? brandNameToId(brand) : null;
+
+    // Resolve which shoe categories to scan
+    const sportsToScan = sportKey === 'all'
+      ? Object.keys(SHOE_CATEGORIES)     // tennis, pickleball, padel
+      : (SHOE_CATEGORIES[sportKey] ? [sportKey] : Object.keys(SHOE_CATEGORIES));
+
+    // Build /products params for one shoe category id (expands subtree)
+    const buildParams = (catId) => {
+      const subtree = expandCategorySubtree(catId);
+      const p = {
+        'searchCriteria[pageSize]': 200,
+        'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]]],total_count'
+      };
+      p['searchCriteria[filter_groups][0][filters][0][field]'] = 'category_id';
+      p['searchCriteria[filter_groups][0][filters][0][value]'] = subtree.join(',');
+      if (subtree.length > 1) p['searchCriteria[filter_groups][0][filters][0][condition_type]'] = 'in';
+      p['searchCriteria[filter_groups][1][filters][0][field]'] = 'status';
+      p['searchCriteria[filter_groups][1][filters][0][value]'] = 1;
+      p['searchCriteria[filter_groups][2][filters][0][field]'] = 'visibility';
+      p['searchCriteria[filter_groups][2][filters][0][value]'] = 4;
+      if (brandId) {
+        p['searchCriteria[filter_groups][3][filters][0][field]'] = 'brands';
+        p['searchCriteria[filter_groups][3][filters][0][value]'] = brandId;
+      }
+      return p;
+    };
+
+    // Fetch each shoe category in parallel, dedupe by SKU, tag sport
+    const _sportForSku = {};
+    const catResults = await Promise.allSettled(
+      sportsToScan.map(s => magentoGet('/products', buildParams(SHOE_CATEGORIES[s])).then(r => ({ s, r })))
+    );
+    const parents = [];
+    const seen = new Set();
+    for (const cr of catResults) {
+      if (cr.status !== 'fulfilled') continue;
+      const { s, r } = cr.value;
+      for (const item of (r.items || [])) {
+        if (!item.sku || seen.has(item.sku)) continue;
+        // Sport-lock via SKU prefix (unless scanning all sports — allowed to mix)
+        if (sportKey !== 'all') {
+          const itemSport = detectSportFromProduct(item, s);
+          if (itemSport !== s) continue;
+        }
+        seen.add(item.sku);
+        _sportForSku[item.sku] = s;
+        parents.push(item);
+      }
+    }
+    console.log(`[getShoesUltra] sport=${sportKey} brand=${brand || '-'} size=${wantSize || '-'} parents=${parents.length}`);
+
+    if (parents.length === 0) {
+      return {
+        customer_query: { sport: sportKey, size: wantSize, brand },
+        products: [],
+        total: 0,
+        showing: 0,
+        message: `No ${sportKey === 'all' ? '' : sportKey + ' '}shoes found.`
+      };
+    }
+
+    // Shape parents (price/in-stock placeholder — will be overwritten from children)
+    const shaped = parents.map(item => shapeProduct(item, 0, _sportForSku[item.sku] || 'tennis'));
+
+    // Enrich EVERY parent with children + MSI stock in parallel.
+    // Higher CAP than legacy enrichConfigurables (which caps at 15) — we want
+    // the full picture so size-X queries never lose a match to pagination.
+    const ULTRA_CAP = 60;        // ~60 parents per sport is ample — exceeds any real shoe catalog slice
+    const ULTRA_CONC = 10;
+    const queue = shaped.slice(0, ULTRA_CAP);
+    const enrichOne = async (p) => {
+      try {
+        const children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
+        if (!Array.isArray(children) || children.length === 0) return;
+        // Prices
+        const prices = children.map(c => parseFloat(c.price || 0)).filter(v => v > 0);
+        if (prices.length) {
+          p.price = Math.min(...prices);
+          const maxP = Math.max(...prices);
+          if (maxP > p.price) p.price_max = maxP;
+        }
+        // Stock (MSI)
+        const childSkus = children.map(c => c.sku);
+        const stockMap = await fetchStockMap(childSkus);
+        // Build child rows with authoritative size (last number in child NAME first, then SKU suffix fallback)
+        const kids = children.map(c => {
+          const nameSizeMatch = String(c.name || '').match(/([\d]+(?:\.[\d]+)?)\s*$/);
+          let sizeStr = nameSizeMatch ? nameSizeMatch[1] : null;
+          if (!sizeStr) {
+            const skuTail = String(c.sku || '').match(/-([\d]+(?:\.[\d]+)?)$/);
+            if (skuTail) sizeStr = skuTail[1];
+          }
+          const qty = parseFloat(stockMap[c.sku] || 0);
+          return {
+            sku: c.sku,
+            name: c.name,
+            price: parseFloat(c.price || 0) || null,
+            qty,
+            size: sizeStr,
+            size_num: sizeStr ? parseFloat(sizeStr) : null,
+            in_stock: qty >= 1
+          };
+        });
+        p._children_ultra = kids;
+        p.qty = kids.reduce((a, b) => a + (b.qty || 0), 0);
+      } catch (e) {
+        // leave as-is — parent will be dropped at qty>=1 gate
+      }
+    };
+    const withTimeout = (pr, ms) => Promise.race([pr, new Promise((_, r) => setTimeout(() => r(new Error('ultra-enrich-timeout')), ms))]);
+    const workers = Array.from({ length: Math.min(ULTRA_CONC, queue.length) }, async () => {
+      while (queue.length) {
+        const item = queue.shift();
+        if (item) {
+          try { await withTimeout(enrichOne(item), 8000); } catch (e) { /* drop silently */ }
+        }
+      }
+    });
+    await Promise.all(workers);
+
+    // For each parent, derive available_sizes_in_stock (qty >= 1 only) + has_requested_size flag
+    const enriched = shaped.map(p => {
+      const kids = p._children_ultra || [];
+      const inStockKids = kids.filter(c => c.in_stock);
+      const sizesInStock = inStockKids.map(c => c.size).filter(Boolean);
+      const sizeSet = [...new Set(sizesInStock)].sort((a, b) => parseFloat(a) - parseFloat(b));
+      p.sizes_available = sizeSet;
+      p.sizes_in_stock = sizeSet;
+      // Size match
+      let hasSize = false;
+      let sizeQty = 0;
+      if (wantSizeNum != null) {
+        const match = inStockKids.find(c => c.size_num != null && Math.abs(c.size_num - wantSizeNum) < 0.001);
+        hasSize = !!match;
+        sizeQty = match ? match.qty : 0;
+      }
+      p.has_requested_size = hasSize;
+      p.requested_size_qty = sizeQty;
+      return p;
+    });
+
+    // Apply price filters
+    let pool = enriched.filter(p => {
+      const pr = parseFloat(p.price || 0);
+      if (maxPrice != null && pr > 0 && pr > maxPrice) return false;
+      if (minPrice != null && pr > 0 && pr < minPrice) return false;
+      return true;
+    });
+
+    // Gate 1: must have at least one in-stock child
+    pool = pool.filter(p => (p.sizes_in_stock || []).length > 0);
+
+    // Gate 2: if a size was requested, require that exact size in stock
+    let sizeGatedPool = pool;
+    if (wantSizeNum != null) {
+      sizeGatedPool = pool.filter(p => p.has_requested_size);
+    }
+
+    // Sort
+    sizeGatedPool.sort((a, b) => (b.qty || 0) - (a.qty || 0));
+
+    // Prepare customer-facing shape
+    const toOut = (p) => ({
+      name: p.name,
+      sku: p.sku,
+      brand: p.brand || null,
+      price: p.price || null,
+      price_max: p.price_max || null,
+      qty: p.qty || 0,
+      in_stock: (p.qty || 0) >= 1,
+      sport: p.sport || _sportForSku[p.sku] || 'tennis',
+      product_url: p.product_url,
+      sizes_available: p.sizes_available || [],
+      sizes_in_stock: p.sizes_in_stock || [],
+      has_requested_size: !!p.has_requested_size,
+      image: p.image || null
+    });
+
+    const outSized = sizeGatedPool.slice(0, page_size).map(toOut);
+
+    // Build message
+    let message;
+    const totalSizeMatches = sizeGatedPool.length;
+    if (wantSizeNum != null) {
+      if (outSized.length > 0) {
+        message = `Found ${totalSizeMatches} ${sportKey === 'all' ? '' : sportKey + ' '}shoe(s) in size ${wantSize} with qty >= 1. Showing ${outSized.length}.`;
+      } else {
+        // Show closest-size alternatives from pool (has stock, wrong size)
+        const alt = pool
+          .map(p => {
+            const nearest = (p.sizes_in_stock || [])
+              .map(s => ({ s, diff: Math.abs(parseFloat(s) - wantSizeNum) }))
+              .sort((a, b) => a.diff - b.diff)[0];
+            return nearest ? { p, nearestSize: nearest.s, diff: nearest.diff } : null;
+          })
+          .filter(Boolean)
+          .sort((a, b) => a.diff - b.diff)
+          .slice(0, page_size);
+        const altOut = alt.map(a => toOut(a.p));
+        message = `NO size ${wantSize} ${sportKey === 'all' ? '' : sportKey + ' '}shoes are in stock. Showing ${altOut.length} closest-size alternatives. LLM MUST: (1) Tell the customer plainly "We don't have size ${wantSize} in stock right now." (2) List these alternatives with their actual available sizes (see sizes_in_stock for each product). (3) NEVER tell the customer to check the product page for sizes — sizes_in_stock is the source of truth.`;
+        return {
+          customer_query: { sport: sportKey, size: wantSize, brand },
+          products: altOut,
+          total: pool.length,
+          showing: altOut.length,
+          size_requested: wantSize,
+          size_available: false,
+          message
+        };
+      }
+    } else {
+      message = `Showing ${outSized.length} ${sportKey === 'all' ? '' : sportKey + ' '}shoe(s) in stock.`;
+    }
+
+    return {
+      customer_query: { sport: sportKey, size: wantSize, brand },
+      products: outSized,
+      total: sizeGatedPool.length,
+      showing: outSized.length,
+      size_requested: wantSize,
+      size_available: wantSizeNum == null ? null : (outSized.length > 0),
+      message
+    };
+  } catch (err) {
+    console.error('getShoesUltra error:', err.response?.status, err.message);
+    return { error: true, message: `Unable to fetch shoes. ${err.message}` };
+  }
+}
+
+
 // ==================== RACQUETS WITH SPECS ====================
 // Tennis Racquets=25, Padel Rackets=272, Pickleball Paddles=250
 const RACQUET_CATEGORIES = { tennis: 25, padel: 272, pickleball: 250 };
@@ -2397,6 +2663,10 @@ async function executeFunction(name, args, sport = 'tennis') {
     case 'get_order_status': return await getOrderStatus(args.order_id);
     case 'get_products_by_category': return await getProductsByCategory(args.category_id, args.page_size, { min_price: args.min_price, max_price: args.max_price, sport });
     case 'search_products': return await searchProducts(args.query, args.page_size, { min_price: args.min_price, max_price: args.max_price, sport });
+    case 'get_shoes_ultra': {
+      const ultraSport = args?.sport || sport || 'all';
+      return await getShoesUltra({ ...(args || {}), sport: ultraSport });
+    }
     case 'get_shoes_with_specs': {
       const shoeSport = args?.sport || sport || 'tennis';
       // If sport is 'all' or unspecified generic, search all 3 shoe categories and merge
@@ -2441,13 +2711,13 @@ const INTENT_RULES = [
   // v6.1.5: Sport-specific shoe intents BEFORE generic shoe — more specific wins
   { intent: 'padel_shoe',
     rx: [/\bpadel\b.*(shoe|shoes|footwear|sneaker)/i, /(shoe|shoes|footwear|sneaker).*\bpadel\b/i],
-    force: 'get_shoes_with_specs', hintArgs: { sport: 'padel' } },
+    force: 'get_shoes_ultra', hintArgs: { sport: 'padel' } },
   { intent: 'pickleball_shoe',
     rx: [/pickle\s*ball.*(shoe|shoes|footwear|sneaker)/i, /(shoe|shoes|footwear|sneaker).*pickle/i],
-    force: 'get_shoes_with_specs', hintArgs: { sport: 'pickleball' } },
+    force: 'get_shoes_ultra', hintArgs: { sport: 'pickleball' } },
   { intent: 'shoe',
     rx: [/\b(shoe|shoes|footwear|sneaker|sneakers|trainer|trainers)\b/i, /sports?\s+shoe/i, /court\s+shoe/i],
-    force: 'get_shoes_with_specs' },
+    force: 'get_shoes_ultra' },
   { intent: 'ball_machine',
     rx: [/ball\s*machine/i, /ball\s*thrower/i, /ball\s*cannon/i, /ball\s*launcher/i, /ball\s*feeder/i, /\btenniix\b/i, /\bai\s*ball\b/i, /smart\s*ball/i],
     force: 'get_ball_machines' },
