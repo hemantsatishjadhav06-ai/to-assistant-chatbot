@@ -3794,6 +3794,69 @@ app.get('/api/debug/stock-sanity', async (req, res) => {
   res.json(out);
 });
 
+// v6.7.2: probe endpoint — runs the EXACT query buildParams generates
+// (with the new sku LIKE <prefix>% filter) and reports raw response counts
+// plus sport-lock stats. Use this to diagnose "shoes-ultra returns 0"
+// before climbing into LLM/chat path.
+app.get('/api/debug/shoes-ultra-probe', async (req, res) => {
+  try {
+    const sport = String(req.query.sport || 'padel').toLowerCase();
+    const catId = SHOE_CATEGORIES[sport];
+    if (!catId) return res.status(400).json({ error: 'unknown sport', sport });
+    const subtree = expandCategorySubtree(catId);
+    const SPORT_SKU_PREFIX = { tennis: 'TSH', pickleball: 'PISH', padel: 'PDSH' };
+    const prefix = SPORT_SKU_PREFIX[sport];
+    const p = {
+      'searchCriteria[pageSize]': 200,
+      'fields': 'items[id,sku,name,type_id,price,status,visibility],total_count',
+      'searchCriteria[sortOrders][0][field]': 'sku',
+      'searchCriteria[sortOrders][0][direction]': 'ASC',
+      'searchCriteria[filter_groups][0][filters][0][field]': 'category_id',
+      'searchCriteria[filter_groups][0][filters][0][value]': subtree.join(','),
+      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
+      'searchCriteria[filter_groups][1][filters][0][value]': 1,
+      'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
+      'searchCriteria[filter_groups][2][filters][0][value]': 4
+    };
+    if (subtree.length > 1) p['searchCriteria[filter_groups][0][filters][0][condition_type]'] = 'in';
+    if (prefix) {
+      p['searchCriteria[filter_groups][3][filters][0][field]'] = 'sku';
+      p['searchCriteria[filter_groups][3][filters][0][value]'] = `${prefix}%`;
+      p['searchCriteria[filter_groups][3][filters][0][condition_type]'] = 'like';
+    }
+    let primary, err1 = null;
+    try { primary = await magentoGet('/products', p); } catch (e) { err1 = (e.response?.status || '?') + ':' + e.message; }
+    const pNo = { ...p };
+    delete pNo['searchCriteria[filter_groups][3][filters][0][field]'];
+    delete pNo['searchCriteria[filter_groups][3][filters][0][value]'];
+    delete pNo['searchCriteria[filter_groups][3][filters][0][condition_type]'];
+    let fallback, err2 = null;
+    try { fallback = await magentoGet('/products', pNo); } catch (e) { err2 = (e.response?.status || '?') + ':' + e.message; }
+
+    res.json({
+      sport,
+      cat_root: catId,
+      subtree,
+      sku_prefix: prefix,
+      params_sent: p,
+      primary: {
+        error: err1,
+        total: primary?.total_count,
+        returned: primary?.items?.length || 0,
+        first_15_skus: (primary?.items || []).slice(0, 15).map(i => i.sku)
+      },
+      no_prefix_compare: {
+        error: err2,
+        total: fallback?.total_count,
+        returned: fallback?.items?.length || 0,
+        first_15_skus: (fallback?.items || []).slice(0, 15).map(i => i.sku)
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0,5) });
+  }
+});
+
 app.get('/api/debug/shoes-ultra', async (req, res) => {
   try {
     const sport = String(req.query.sport || 'all');
