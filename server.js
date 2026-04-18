@@ -1966,13 +1966,23 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
     const SPORT_SKU_PREFIX = { tennis: 'TSH', pickleball: 'PISH', padel: 'PDSH' };
     const buildParams = (catId, sportForQuery) => {
       const subtree = expandCategorySubtree(catId);
+      // v6.7.11: tennis-only sort flip — DESC. The 227 TSH* parents are
+      // numbered roughly chronologically; the first ~60 (TSH0001..TSH0060)
+      // are legacy dead stock with every child qty=0 in MSI. Sorting DESC
+      // makes the newest TSH* (more likely to have current inventory) land
+      // in the first 60 positions enriched. This is a SAFETY belt under
+      // the v6.7.9 quantity_and_stock_status filter — if Magento doesn't
+      // honour that flag for configurables in this instance, DESC ordering
+      // still gets us into live inventory. Pickleball/padel keep ASC so
+      // their (small) catalog returns deterministically.
+      const sortDir = (sportForQuery === 'tennis') ? 'DESC' : 'ASC';
       const p = {
         'searchCriteria[pageSize]': 200,
         'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url],configurable_product_links]],total_count',
         // Deterministic sort so padel/pickleball shoes (P prefix) land before
         // tennis (T) when cross-listed.
         'searchCriteria[sortOrders][0][field]': 'sku',
-        'searchCriteria[sortOrders][0][direction]': 'ASC'
+        'searchCriteria[sortOrders][0][direction]': sortDir
       };
       p['searchCriteria[filter_groups][0][filters][0][field]'] = 'category_id';
       p['searchCriteria[filter_groups][0][filters][0][value]'] = subtree.join(',');
@@ -2093,7 +2103,12 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
                 'searchCriteria[filter_groups][0][filters][0][field]': 'entity_id',
                 'searchCriteria[filter_groups][0][filters][0][value]': linkIds.join(','),
                 'searchCriteria[filter_groups][0][filters][0][condition_type]': 'in',
-                'fields': 'items[id,sku,name,price,status,visibility]'
+                // v6.7.11: include special_price + custom_attributes so the
+                // child-level special price (where it actually lives) reaches
+                // the price aggregation below. Without these fields the
+                // ASICS Resolution X Padel returned its parent base price
+                // (₹13,999) instead of the child special price (₹11,899).
+                'fields': 'items[id,sku,name,price,special_price,custom_attributes,status,visibility]'
               };
               const byIds = await magentoGet('/products', qp);
               children = byIds?.items || [];
@@ -2101,6 +2116,14 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
           } catch (fe) { /* fallback failed — leave children empty, parent will drop */ }
         }
         if (!Array.isArray(children) || children.length === 0) return;
+        // v6.7.11: helper — special_price lives in custom_attributes for most
+        // Magento configurations; only some installs expose it at root. Read
+        // both locations and prefer custom_attributes (the canonical home).
+        const childSpecialPrice = (c) => {
+          const ca = (c.custom_attributes || []).find(a => a.attribute_code === 'special_price');
+          const v = ca ? parseFloat(ca.value) : parseFloat(c.special_price || 0);
+          return Number.isFinite(v) && v > 0 ? v : 0;
+        };
         // Prices
         const prices = children.map(c => parseFloat(c.price || 0)).filter(v => v > 0);
         if (prices.length) {
@@ -2108,6 +2131,20 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
           const maxP = Math.max(...prices);
           if (maxP > p.price) p.price_max = maxP;
         }
+        // v6.7.11: SPECIAL PRICE ALWAYS WINS (getShoesUltra path).
+        // Aggregate the child special_prices and, if any are set, use the
+        // minimum as the parent's displayed price — matching shapeProduct
+        // and enrichConfigurables behaviour. Drop original/special so the
+        // LLM can never render a strikethrough or "was X / now Y".
+        const childSpecials = children.map(childSpecialPrice).filter(v => v > 0);
+        if (childSpecials.length) {
+          const minSpecial = Math.min(...childSpecials);
+          p.price = minSpecial;
+          // ranges no longer meaningful when special applied
+          delete p.price_max;
+        }
+        p.original_price = null;
+        delete p.special_price;
         // Stock (MSI)
         const childSkus = children.map(c => c.sku);
         const stockMap = await fetchStockMap(childSkus);
@@ -2423,7 +2460,10 @@ async function enrichConfigurables(products, forceAll = true) {
               'searchCriteria[filter_groups][0][filters][0][field]': 'entity_id',
               'searchCriteria[filter_groups][0][filters][0][value]': linkIds.join(','),
               'searchCriteria[filter_groups][0][filters][0][condition_type]': 'in',
-              'fields': 'items[id,sku,name,price,status,visibility]'
+              // v6.7.11: include special_price + custom_attributes — see
+              // matching change in getShoesUltra. Children fetched without
+              // these fields lose the special price entirely.
+              'fields': 'items[id,sku,name,price,special_price,custom_attributes,status,visibility]'
             };
             const byIds = await magentoGet('/products', qp);
             children = byIds?.items || [];
@@ -2431,6 +2471,14 @@ async function enrichConfigurables(products, forceAll = true) {
         } catch (fe) { /* leave empty */ }
       }
       if (!Array.isArray(children) || children.length === 0) return;
+      // v6.7.11: read special_price from custom_attributes (canonical) with
+      // root-level fallback. Previous code only checked c.special_price at
+      // root, which is empty in most Magento responses.
+      const childSpecialPrice = (c) => {
+        const ca = (c.custom_attributes || []).find(a => a.attribute_code === 'special_price');
+        const v = ca ? parseFloat(ca.value) : parseFloat(c.special_price || 0);
+        return Number.isFinite(v) && v > 0 ? v : 0;
+      };
       // Price: lowest non-zero across children; keep a max for ranges.
       const prices = children.map(c => parseFloat(c.price || 0)).filter(v => v > 0);
       if (prices.length) {
@@ -2438,7 +2486,7 @@ async function enrichConfigurables(products, forceAll = true) {
         const maxP = Math.max(...prices);
         if (maxP > p.price) p.price_max = maxP;
       }
-      const sp = children.map(c => parseFloat(c.special_price || 0)).filter(v => v > 0);
+      const sp = children.map(childSpecialPrice).filter(v => v > 0);
       if (sp.length && !p.special_price) p.special_price = Math.min(...sp);
       // v6.7.10: SPECIAL PRICE ALWAYS WINS (parent aggregate).
       // If any child has a special_price set, we use the min of those as
@@ -3786,7 +3834,7 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'running',
     version: pkg.version,
-    code_build: '6.1.5c',
+    code_build: '6.7.11',
     last_refresh: lastCatalogRefresh,
     categories_loaded: CATEGORY_MAP.length,
     category_index_keys: Object.keys(CATEGORY_INDEX).length,
