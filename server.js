@@ -3838,11 +3838,24 @@ app.get('/api/debug/shoes-ultra-probe', async (req, res) => {
     const enrichDetails = [];
     const parentsToProbe = (primary?.items || []).slice(0, 5);
     for (const parent of parentsToProbe) {
-      const row = { sku: parent.sku, name: (parent.name || '').slice(0, 40) };
+      const row = { sku: parent.sku, name: (parent.name || '').slice(0, 40), type_id: parent.type_id };
+      // Raw axios call to /configurable-products/{sku}/children — capture status + shape
       try {
-        const children = await magentoGet(`/configurable-products/${encodeURIComponent(parent.sku)}/children`);
-        row.children_count = Array.isArray(children) ? children.length : 0;
-        const childSkus = (children || []).map(c => c.sku);
+        const rawResp = await axios.get(`${MAGENTO_REST}/configurable-products/${encodeURIComponent(parent.sku)}/children`, {
+          headers: { 'Authorization': `Bearer ${MAGENTO_TOKEN}`, 'Accept': 'application/json' },
+          timeout: 10000,
+          validateStatus: () => true
+        });
+        row.children_raw = {
+          http_status: rawResp.status,
+          data_type: Array.isArray(rawResp.data) ? 'array' : typeof rawResp.data,
+          array_length: Array.isArray(rawResp.data) ? rawResp.data.length : null,
+          first_item_keys: Array.isArray(rawResp.data) && rawResp.data[0] ? Object.keys(rawResp.data[0]).slice(0,8) : null,
+          body_snippet: typeof rawResp.data === 'string' ? rawResp.data.slice(0,200) : JSON.stringify(rawResp.data).slice(0,300)
+        };
+        const children = Array.isArray(rawResp.data) ? rawResp.data : [];
+        row.children_count = children.length;
+        const childSkus = children.map(c => c.sku);
         row.child_skus = childSkus.slice(0, 6);
         if (childSkus.length > 0) {
           const stockMap = await fetchStockMap(childSkus);
@@ -3851,6 +3864,19 @@ app.get('/api/debug/shoes-ultra-probe', async (req, res) => {
         }
       } catch (e) {
         row.error = (e.response?.status || '?') + ':' + e.message;
+      }
+      // v6.7.2: fetch parent product details — see extension_attributes.configurable_product_links
+      try {
+        const parentFull = await magentoGet(`/products/${encodeURIComponent(parent.sku)}`);
+        row.parent_full = {
+          type_id: parentFull.type_id,
+          has_ext_children: !!(parentFull.extension_attributes && parentFull.extension_attributes.configurable_product_links),
+          ext_links_count: parentFull.extension_attributes?.configurable_product_links?.length || 0,
+          ext_links_sample: parentFull.extension_attributes?.configurable_product_links?.slice(0, 4) || null,
+          ext_options_count: parentFull.extension_attributes?.configurable_product_options?.length || 0
+        };
+      } catch (e) {
+        row.parent_full_err = (e.response?.status || '?') + ':' + e.message;
       }
       enrichDetails.push(row);
     }
