@@ -457,7 +457,7 @@ PRODUCT PRESENTATION RULES (MANDATORY ÃÂ¢ÃÂÃÂ NEVER SKIP):
 - The product_url is already in every product object the tool returns. Copy it exactly into the markdown link parentheses. The URL already points to the correct store (tennisoutlet.in, pickleballoutlet.in, or padeloutlet.in) based on the sport. Example: if the tool returns product_url: "https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html", write: **[Joola Hyperion Vision 16 mm - Storm Blue](https://pickleballoutlet.in/joola-hyperion-vision-16-mm-storm-blue.html)**
 - If you list a product WITHOUT a clickable link, the response is BROKEN and unusable. Always include the link.
 - NEVER show quantity/stock numbers to the customer in your final reply, anywhere — prose, lists, tables, captions, headers. Tools may return a qty field; use it ONLY for your internal ranking/filtering decisions. Do NOT print a "Stock", "Qty", "Quantity", "Availability", "Units", "Inventory", or "On Hand" column in any markdown table. Do NOT put qty in a bullet like "Stock: 6" or "6 in stock" or "6 left" or "Only 2 remaining". If you are building a comparison table, the allowed columns are: Feature | Product A | Product B | Product C — with rows like Price, Brand, Weight, Head Size, String Pattern, Cushioning, Court Type, Outsole, Ideal For. NEVER add a row or column for stock/qty. The only way to signal availability to the customer is to simply omit any product where in_stock is false — never describe stock in words or numbers.
-- PRICE RULE (v6.7.5): Every product listing MUST show the LOW price only — the "price" field the tool returns is already the minimum price across variants. NEVER display "from", "starting at", price ranges, "₹X–₹Y", or both a low and a high price. Just the single low price, formatted ₹X,XXX.
+- PRICE RULE (v6.7.10): The "price" field the tool returns is the customer-facing selling price — if Magento has a special_price set, that IS the price returned. ALWAYS show only this single price, formatted ₹X,XXX. NEVER show a strikethrough or "was X / now Y", NEVER show ranges like "₹X–₹Y", NEVER write "from" or "starting at". Just the one number. The original_price field is intentionally null and must NEVER be displayed.
 - IN-DEPTH ANALYSIS RULE (v6.7.5): When recommending any product (shoe, racquet, paddle, bag, balls, ball machine, apparel), write a rich "Coach's Take" that is SPECIFIC to the product — pull from its real spec fields (court_type, cushioning, width, shoe_type, shoe_weight, outsole, outer_material, inner_material, weight, head_size, balance, string_pattern, stiffness, made_in_country, short_description). Cover as relevant: (a) the ideal player/use case (beginner/intermediate/advanced, playing style, court surface), (b) key technology or construction feature that matters (e.g. FlyteFoam midsole, Twistra chassis, woven toe guard, carbon frame, cork grip), (c) one trade-off to set expectations (weight vs. stability, cushioning vs. court feel, power vs. control), (d) why this specific product beats its rivals in stock. Do NOT invent specs — if a field is null, omit it rather than guessing. Write 2–4 tight sentences per product, grounded only in the tool's data.
 - ONLY recommend products where in_stock is true. If a product has in_stock: false or qty: 0, SKIP it entirely ÃÂ¢ÃÂÃÂ do not mention it.
 - NEVER use markdown images ![]().
@@ -1470,12 +1470,19 @@ function shapeProduct(item, qty, sport = 'tennis') {
       .filter(Boolean);
   }
   if (Object.keys(shoeSpecs).length) shaped.specs = shoeSpecs;
-  // v6.0.5: Show lowest selling price — if special_price exists and is lower, use it as main price
-  if (shaped.special_price && shaped.special_price > 0 && (!shaped.price || shaped.special_price < shaped.price)) {
-    shaped.original_price = shaped.price;
+  // v6.7.10: SPECIAL PRICE ALWAYS WINS.
+  // Previously the swap only happened when special_price < price (v6.0.5
+  // "lowest selling price" rule). Per product requirement we now treat
+  // the special price as the customer-facing selling price whenever
+  // Magento has set one (regardless of whether it is lower than the
+  // base price). The base "price" is also dropped from output so the
+  // LLM cannot accidentally surface a strikethrough / "was X" / range —
+  // matching the existing PRICE RULE in the system prompt.
+  if (shaped.special_price && shaped.special_price > 0) {
     shaped.price = shaped.special_price;
   }
-  delete shaped.special_price;  // LLM only sees one price field — the lowest
+  shaped.original_price = null;   // never expose old price to the LLM
+  delete shaped.special_price;    // LLM only sees one price field
   return shaped;
 }
 
@@ -2433,11 +2440,15 @@ async function enrichConfigurables(products, forceAll = true) {
       }
       const sp = children.map(c => parseFloat(c.special_price || 0)).filter(v => v > 0);
       if (sp.length && !p.special_price) p.special_price = Math.min(...sp);
-      // v6.0.5: resolve to lowest selling price after enrichment
-      if (p.special_price && p.special_price > 0 && (!p.price || p.special_price < p.price)) {
-        p.original_price = p.price;
+      // v6.7.10: SPECIAL PRICE ALWAYS WINS (parent aggregate).
+      // If any child has a special_price set, we use the min of those as
+      // the displayed parent price — regardless of whether it is lower
+      // than the base price. Base price is dropped; only the special
+      // price reaches the LLM / customer. Matches the shapeProduct rule.
+      if (p.special_price && p.special_price > 0) {
         p.price = p.special_price;
       }
+      p.original_price = null;
       delete p.special_price;
       // Stock: per-child and summed. ALWAYS override parent qty with children total.
       // This corrects false positives from /stockItems (is_in_stock=true but children OOS).
