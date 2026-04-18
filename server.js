@@ -3390,6 +3390,33 @@ app.get('/api/health', async (req, res) => {
 });
 
 // ==================== STOCK DIAGNOSTIC (temporary) ====================
+app.get('/api/debug/shoes-ultra', async (req, res) => {
+  try {
+    const sport = String(req.query.sport || 'all');
+    const size = req.query.size ? String(req.query.size) : null;
+    const brand = req.query.brand ? String(req.query.brand) : null;
+    const result = await getShoesUltra({ sport, size, brand, page_size: 10 });
+    // Keep response compact for inspection
+    const slim = {
+      customer_query: result.customer_query,
+      size_requested: result.size_requested,
+      size_available: result.size_available,
+      total: result.total,
+      showing: result.showing,
+      message: result.message,
+      products: (result.products || []).map(p => ({
+        name: p.name, sku: p.sku, price: p.price, qty: p.qty,
+        sport: p.sport, in_stock: p.in_stock,
+        sizes_in_stock: p.sizes_in_stock,
+        has_requested_size: p.has_requested_size
+      }))
+    };
+    res.json(slim);
+  } catch (e) {
+    res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0,5) });
+  }
+});
+
 app.get('/api/stock-debug', async (req, res) => {
   const keyword = req.query.q || 'tennis racquet';
   const sport = req.query.sport || 'tennis';
