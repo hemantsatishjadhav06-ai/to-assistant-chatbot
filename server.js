@@ -30,7 +30,7 @@ app.use('/api/', limiter);
 // v6.7.0 (Patch 9): stricter per-IP limiter for chat endpoints to protect Magento/OpenRouter budgets
 const chatLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 12,
+  max: 20,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many chat requests. Please slow down and try again in a minute.' }
@@ -227,12 +227,12 @@ const CATEGORY_SUBTREE = {
   245: [245,
         272, 277, 278, 279, 280, 303, 329, 331, 339, 427,
         273, 281, 282, 283, 284, 313, 360, 428, 453,
-        274, 287, 288, 289, 290, 291, 314, 367, 424,
+        274, 287, 288, 289, 290, 291, 314, 367, 401, 424,
         275, 304, 305, 306, 318, 330, 369,
         276, 363, 375, 432, 436, 452],
   272: [272, 277, 278, 279, 280, 303, 329, 331, 339, 427],           // Padel Rackets
   273: [273, 281, 282, 283, 284, 313, 360, 428, 453],                // Padel Balls
-  274: [274, 287, 288, 289, 290, 291, 314, 367, 424],                // Padel Shoes
+  274: [274, 287, 288, 289, 290, 291, 314, 367, 401, 424],          // Padel Shoes (v6.7.1: added 401 Syxx)
   275: [275, 304, 305, 306, 318, 330, 369],                          // Padel Bags
   276: [276, 363, 375, 432, 436, 452],                               // Padel Accessories
 
@@ -405,7 +405,10 @@ const SPORT_COACHING_NOTES = {
 };
 
 // ==================== SYSTEM PROMPT ====================
-const SYSTEM_PROMPT = `You are "TO Assistant" - the official Customer Support Assistant for Pro Sports Outlets, India's trusted online stores for racquet sports:
+const SYSTEM_PROMPT = `CRITICAL STOCK LANGUAGE RULE (v6.7.1, overrides everything else):
+NEVER tell the customer a specific inventory number. Do NOT write "3 in stock", "only 2 left", "9 available", "5 pairs", "we have 7", or any number attached to availability. You may ONLY say "available" / "in stock" / "not currently available" / "currently unavailable". Tool results may contain an \`available: true/false\` boolean — trust that boolean, ignore any leaked qty. Violating this rule leaks warehouse counts to customers and is a hard product failure.
+
+You are "TO Assistant" - the official Customer Support Assistant for Pro Sports Outlets, India's trusted online stores for racquet sports:
 - Tennis: TennisOutlet.in (https://tennisoutlet.in)
 - Pickleball: PickleballOutlet.in (https://pickleballoutlet.in)
 - Padel: PadelOutlet.in (https://padeloutlet.in)
@@ -1147,9 +1150,11 @@ async function magentoGet(endpoint, params = {}, attempt = 0) {
     return response.data;
   } catch (err) {
     const status = err.response?.status;
-    // v6.7.0 (Patch 8): retry once on transient 5xx / 429 with small jitter
-    if (attempt < 1 && (status === 429 || (status >= 500 && status <= 599))) {
-      const delay = 300 + Math.floor(Math.random() * 400);
+    // v6.7.1: 2 retries with exponential backoff on transient 5xx / 429
+    // attempt 0 -> 400-700ms, attempt 1 -> 800-1400ms
+    if (attempt < 2 && (status === 429 || (status >= 500 && status <= 599))) {
+      const base = 400 * Math.pow(2, attempt);
+      const delay = base + Math.floor(Math.random() * 300);
       await new Promise(r => setTimeout(r, delay));
       return magentoGet(endpoint, params, attempt + 1);
     }
@@ -1336,9 +1341,8 @@ async function _fetchStockMapLive(skus) {
       'searchCriteria[filter_groups][0][filters][0][field]': 'sku',
       'searchCriteria[filter_groups][0][filters][0][value]': batch.join(','),
       'searchCriteria[filter_groups][0][filters][0][condition_type]': 'in',
-      'searchCriteria[filter_groups][1][filters][0][field]': 'status',
-      'searchCriteria[filter_groups][1][filters][0][value]': 1,
-      'searchCriteria[filter_groups][1][filters][0][condition_type]': 'eq',
+      // v6.7.1: status filter REMOVED. status is an admin toggle, not a stock signal.
+      // Trust quantity>0 as source of truth. Drops valid-stock rows were being excluded.
       'searchCriteria[pageSize]': batch.length * 5
     };
     try {
@@ -3054,6 +3058,41 @@ function pushTrace(entry) {
 }
 
 // ==================== CHAT API ====================
+// v6.7.1: strip raw inventory numbers from tool results before the LLM sees them.
+// Keeps an `available` boolean (truthy iff the number was >= 1). Renames
+// sizes_in_stock -> sizes_available so the model can't parrot qty numbers.
+function sanitizeToolResult(obj) {
+  const QTY_KEYS = new Set(['qty', 'quantity', 'requested_size_qty', 'stock_qty', 'inventory', 'stock']);
+  const walk = (node) => {
+    if (node === null || node === undefined) return node;
+    if (Array.isArray(node)) return node.map(walk);
+    if (typeof node !== 'object') return node;
+    const out = {};
+    for (const [k, v] of Object.entries(node)) {
+      if (QTY_KEYS.has(k)) {
+        const num = parseFloat(v);
+        if (!Number.isNaN(num)) out.available = num >= 1;
+        continue;
+      }
+      if (k === 'in_stock') {
+        out.available = (v === true || v === 1);
+        continue;
+      }
+      if (k === 'sizes_in_stock') {
+        // strip any embedded qty, keep only size strings
+        const sizes = Array.isArray(v)
+          ? v.map(item => (item && typeof item === 'object') ? (item.size ?? item.size_num ?? item) : item)
+          : v;
+        out.sizes_available = sizes;
+        continue;
+      }
+      out[k] = walk(v);
+    }
+    return out;
+  };
+  return walk(obj);
+}
+
 app.post('/api/chat', async (req, res) => {
   try {
     const { messages } = req.body;
@@ -3215,10 +3254,12 @@ app.post('/api/chat', async (req, res) => {
         console.log(`[Call] ${funcName}(${JSON.stringify(funcArgs)})`);
         const result = await executeFunction(funcName, funcArgs, detectedSportForTurn || 'tennis');
         console.log(`[Result] ${funcName}: ${JSON.stringify(result).substring(0, 200)}...`);
+        // v6.7.1: sanitize raw qty/quantity fields before handing to LLM
+        const sanitized = sanitizeToolResult(result);
         toolResults.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: JSON.stringify(result)
+          content: JSON.stringify(sanitized)
         });
       }
       toolResults.forEach(t => conversation.push(t));
@@ -3653,6 +3694,82 @@ app.get('/api/health', async (req, res) => {
 });
 
 // ==================== STOCK DIAGNOSTIC (temporary) ====================
+// v6.7.1: per-SKU stock-sanity probe — hits MSI, legacy /stockItems, and /products/{sku}
+// simultaneously and reports raw quantities from each source. Used to verify
+// "our MSI query actually returns this SKU with qty>0" without reading any chat reply.
+app.get('/api/debug/stock-sanity', async (req, res) => {
+  const sku = String(req.query.sku || '').trim();
+  if (!sku) return res.status(400).json({ error: 'provide ?sku=SKU' });
+
+  const out = { sku, msi: null, legacy: null, product: null, verdict: null };
+
+  // 1) MSI /inventory/source-items
+  try {
+    const msiParams = {
+      'searchCriteria[filter_groups][0][filters][0][field]': 'sku',
+      'searchCriteria[filter_groups][0][filters][0][value]': sku,
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': 'eq',
+      'searchCriteria[pageSize]': 20
+    };
+    let msi;
+    try { msi = await oauthGet('/inventory/source-items', msiParams); }
+    catch (e) {
+      if (e.response?.status === 401 || e.response?.status === 404) {
+        msi = await magentoGet('/inventory/source-items', msiParams);
+      } else throw e;
+    }
+    const rows = (msi?.items || []).map(r => ({
+      source_code: r.source_code,
+      sku: r.sku,
+      quantity: parseFloat(r.quantity || 0),
+      status: r.status
+    }));
+    const totalQty = rows.reduce((a, r) => a + (r.quantity > 0 ? r.quantity : 0), 0);
+    out.msi = { rows, totalQtyByPositiveQuantity: totalQty };
+  } catch (e) { out.msi = { error: e.response?.status || e.message }; }
+
+  // 2) Legacy /stockItems/{sku}
+  try {
+    let si;
+    try { si = await magentoGet(`/stockItems/${encodeURIComponent(sku)}`); }
+    catch (e) {
+      if (e.response?.status === 401) si = await oauthGet(`/stockItems/${encodeURIComponent(sku)}`);
+      else throw e;
+    }
+    out.legacy = {
+      qty: parseFloat(si?.qty || 0),
+      is_in_stock: si?.is_in_stock,
+      manage_stock: si?.manage_stock
+    };
+  } catch (e) { out.legacy = { error: e.response?.status || e.message }; }
+
+  // 3) /products/{sku} — confirm product exists + visibility/status
+  try {
+    const pr = await magentoGet(`/products/${encodeURIComponent(sku)}`);
+    out.product = {
+      sku: pr?.sku,
+      name: pr?.name,
+      status: pr?.status,
+      visibility: pr?.visibility,
+      type_id: pr?.type_id,
+      price: pr?.price
+    };
+  } catch (e) { out.product = { error: e.response?.status || e.message }; }
+
+  // Verdict: what would fetchStockMap have returned?
+  const msiQty = (out.msi?.totalQtyByPositiveQuantity) || 0;
+  const legacyQty = (out.legacy?.qty) || 0;
+  const legacyInStock = out.legacy?.is_in_stock === true;
+  const effective = msiQty > 0 ? msiQty : (legacyInStock && legacyQty > 0 ? legacyQty : (legacyInStock ? 1 : 0));
+  out.verdict = {
+    effective_qty: effective,
+    customer_sees_available: effective >= 1,
+    source: msiQty > 0 ? 'msi' : (legacyInStock ? 'legacy' : 'none')
+  };
+
+  res.json(out);
+});
+
 app.get('/api/debug/shoes-ultra', async (req, res) => {
   try {
     const sport = String(req.query.sport || 'all');
