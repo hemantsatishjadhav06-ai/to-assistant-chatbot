@@ -198,9 +198,18 @@ ${COMMON_RULES}`,
     * Padel ball / padel balls / paddle ball / paddleball / paddel ball → get_products_by_category({category_id:273})
   "paddle ball" / "paddleball" is the Indian-English phonetic spelling of "padel ball" — it is PADEL, never pickleball.
   NEVER show tennis balls for a pickleball query. NEVER show pickleballs for a tennis or padel query. A tennis ball is pressurized felt (65mm). A pickleball is PERFORATED PLASTIC. A padel ball is tennis-shaped but lower pressure. They are NOT interchangeable.
-- For strings, bags, accessories, clothing: use smart_product_search with the customer's keywords.
+- BAGS - SPORT LOCK: tennis bags, pickleball bags and padel bags are DIFFERENT categories.
+    * Tennis bag / tennis bags → get_products_by_category({category_id:115})
+    * Pickleball bag / pickleball bags → get_products_by_category({category_id:254})
+    * Padel bag / padel bags → get_products_by_category({category_id:275})
+  If the slots show sport=pickleball and category=bags, you MUST call get_products_by_category({category_id:254}) — NOT 252 (that is balls). Same rule for padel bags (275) and tennis bags (115).
+- SHOES - SPORT LOCK: tennis shoes, pickleball shoes and padel shoes are DIFFERENT categories.
+    * Tennis shoes → get_products_by_category({category_id:24})
+    * Pickleball shoes → get_products_by_category({category_id:253})
+    * Padel shoes → get_products_by_category({category_id:274})
+- For strings, accessories, clothing (no sport-specific subcats): use smart_product_search with the customer's keywords.
 - Use get_products_by_category when you know the exact category ID.
-- Category IDs: Tennis Balls=31, Pickleball Balls=252, Padel Balls=273, Strings=29, Bags=115, Accessories=37, Used Racquets=90, Clothing=36, Wimbledon Sale=292, Grand Slam=349, Boxing Day=437.
+- Category IDs: Tennis Balls=31, Pickleball Balls=252, Padel Balls=273, Tennis Bags=115, Pickleball Bags=254, Padel Bags=275, Tennis Shoes=24, Pickleball Shoes=253, Padel Shoes=274, Strings=29, Accessories=37, Used Racquets=90, Clothing=36, Wimbledon Sale=292, Grand Slam=349, Boxing Day=437.
 - Use the sport-specific store URL for product links: Tennis=https://tennisoutlet.in, Pickleball=https://pickleballoutlet.in, Padel=https://padeloutlet.in. The tool already returns the correct product_url — use it.
 ${COMMON_RULES}`,
 
