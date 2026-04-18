@@ -1966,15 +1966,16 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
     const SPORT_SKU_PREFIX = { tennis: 'TSH', pickleball: 'PISH', padel: 'PDSH' };
     const buildParams = (catId, sportForQuery) => {
       const subtree = expandCategorySubtree(catId);
-      // v6.7.11: tennis-only sort flip — DESC. The 227 TSH* parents are
-      // numbered roughly chronologically; the first ~60 (TSH0001..TSH0060)
-      // are legacy dead stock with every child qty=0 in MSI. Sorting DESC
-      // makes the newest TSH* (more likely to have current inventory) land
-      // in the first 60 positions enriched. This is a SAFETY belt under
-      // the v6.7.9 quantity_and_stock_status filter — if Magento doesn't
-      // honour that flag for configurables in this instance, DESC ordering
-      // still gets us into live inventory. Pickleball/padel keep ASC so
-      // their (small) catalog returns deterministically.
+      // v6.7.11/v6.7.12: tennis-only sort flip — DESC. The 227 TSH* parents
+      // are numbered roughly chronologically; the first ~60
+      // (TSH0001..TSH0060) are legacy dead stock with every child qty=0 in
+      // MSI. Sorting DESC makes the NEWEST TSH* (more likely to have current
+      // inventory) land in the first 60 positions enriched. With the v6.7.12
+      // removal of the quantity_and_stock_status filter (which was killing
+      // the entire tennis query — see comment block below), DESC sort is
+      // now the SOLE mechanism that gets enrichment into live tennis
+      // inventory. Pickleball/padel keep ASC so their (small) catalog
+      // returns deterministically.
       const sortDir = (sportForQuery === 'tennis') ? 'DESC' : 'ASC';
       const p = {
         'searchCriteria[pageSize]': 200,
@@ -2001,24 +2002,17 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
         p[`searchCriteria[filter_groups][${nextGroup}][filters][0][condition_type]`] = 'like';
         nextGroup++;
       }
-      // v6.7.9 TENNIS-ONLY in-stock pre-filter.
-      // Tennis has 227 TSH* configurable parents under cat 24. Sorted SKU
-      // ASC, the first ~60 (TSH0001..TSH0060) are legacy dead stock —
-      // every child qty=0 in MSI. ULTRA_CAP=60 never reaches live SKUs, so
-      // enrichment returns an empty pool and the bot answers "no tennis
-      // shoes in stock". Pickleball (11 PISH*) and padel fit inside the
-      // cap so they're not affected.
-      // Fix: ask Magento to drop out-of-stock parents server-side via the
-      // built-in `quantity_and_stock_status` attribute (1 = at least one
-      // child is salable). Shrinks the tennis candidate set from 227 to
-      // ~40-80, all of which now fit inside ULTRA_CAP=60 → enrichment
-      // sees live shoes. Pickleball/padel paths are NOT modified.
-      if (sportForQuery === 'tennis') {
-        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][field]`] = 'quantity_and_stock_status';
-        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][value]`] = 1;
-        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][condition_type]`] = 'eq';
-        nextGroup++;
-      }
+      // v6.7.12: REMOVED v6.7.9 tennis-only `quantity_and_stock_status=1`
+      // pre-filter. Empirical result on this Magento instance: that filter
+      // collapses the tennis result set to 0 — Magento does NOT honor
+      // quantity_and_stock_status at the CONFIGURABLE parent level in this
+      // store. The aggregated stock status lives on children + MSI source
+      // items, not on the parent row, so the filter returns no matches.
+      // Post-v6.7.12 strategy for tennis: rely on DESC sort (set in the
+      // sortOrders above) to bring the NEWEST TSH* parents (most likely to
+      // have live inventory) into the first 60 slots, then let the existing
+      // enrichOne + MSI salability check gate out-of-stock items at
+      // enrichment time. Pickleball/padel unchanged.
       if (brandId) {
         p[`searchCriteria[filter_groups][${nextGroup}][filters][0][field]`] = 'brands';
         p[`searchCriteria[filter_groups][${nextGroup}][filters][0][value]`] = brandId;
@@ -3834,7 +3828,7 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'running',
     version: pkg.version,
-    code_build: '6.7.11',
+    code_build: '6.7.12',
     last_refresh: lastCatalogRefresh,
     categories_loaded: CATEGORY_MAP.length,
     category_index_keys: Object.keys(CATEGORY_INDEX).length,
