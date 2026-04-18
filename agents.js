@@ -60,7 +60,7 @@ Intents:
 - "racquet"      -> racquet/racket/paddle recommendations or browsing
 - "shoe"         -> shoes / footwear
 - "availability" -> checking if a SPECIFIC product is in stock ("do you have X?", "is X available?")
-- "comparison"   -> comparing two or more specific products ("X vs Y", "compare X and Y")
+- "comparison"   -> comparing two or more specific products ("X vs Y", "compare X and Y"). IF the message contains the word "compare", "vs", "versus", "difference between", "side by side", or "which is better", classify as comparison — EVEN IF the query also contains product words like "shoes", "racquet", "paddle", "bag", or "balls". The comparison intent always wins over the product-type intents when any of these comparison keywords are present.
 - "starter_kit"  -> complete beginner setup ("what do I need to start?", "beginner kit")
 - "brand"        -> which brands do you carry, brand list
 - "catalog"      -> balls, strings, bags, accessories, ball machines, sale items, used racquets, clothing
