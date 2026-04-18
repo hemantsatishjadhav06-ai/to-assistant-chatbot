@@ -3833,6 +3833,28 @@ app.get('/api/debug/shoes-ultra-probe', async (req, res) => {
     let fallback, err2 = null;
     try { fallback = await magentoGet('/products', pNo); } catch (e) { err2 = (e.response?.status || '?') + ':' + e.message; }
 
+    // v6.7.2 deeper probe: enrich each parent via /configurable-products/{sku}/children
+    // and fetchStockMap — pinpoint where the 27 PDSH* parents are getting dropped.
+    const enrichDetails = [];
+    const parentsToProbe = (primary?.items || []).slice(0, 5);
+    for (const parent of parentsToProbe) {
+      const row = { sku: parent.sku, name: (parent.name || '').slice(0, 40) };
+      try {
+        const children = await magentoGet(`/configurable-products/${encodeURIComponent(parent.sku)}/children`);
+        row.children_count = Array.isArray(children) ? children.length : 0;
+        const childSkus = (children || []).map(c => c.sku);
+        row.child_skus = childSkus.slice(0, 6);
+        if (childSkus.length > 0) {
+          const stockMap = await fetchStockMap(childSkus);
+          row.stock_map = Object.fromEntries(childSkus.map(s => [s, stockMap[s] ?? null]));
+          row.in_stock_count = Object.values(row.stock_map).filter(v => v && v >= 1).length;
+        }
+      } catch (e) {
+        row.error = (e.response?.status || '?') + ':' + e.message;
+      }
+      enrichDetails.push(row);
+    }
+
     res.json({
       sport,
       cat_root: catId,
@@ -3850,7 +3872,8 @@ app.get('/api/debug/shoes-ultra-probe', async (req, res) => {
         total: fallback?.total_count,
         returned: fallback?.items?.length || 0,
         first_15_skus: (fallback?.items || []).slice(0, 15).map(i => i.sku)
-      }
+      },
+      enrichment_probe: enrichDetails
     });
   } catch (e) {
     res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0,5) });
