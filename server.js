@@ -2046,7 +2046,29 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
     const queue = shaped.slice(0, ULTRA_CAP);
     const enrichOne = async (p) => {
       try {
-        const children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
+        // v6.7.3: /configurable-products/{sku}/children is unreliable — returns [] even
+        // when extension_attributes.configurable_product_links is populated (Magento
+        // catalog_product_super_link table sync bug). Always try /children first; if
+        // empty AND parent is configurable, fallback to fetching products by entity_id.
+        let children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
+        if (!Array.isArray(children) || children.length === 0) {
+          // Fallback path: read configurable_product_links from parent product
+          try {
+            const parentFull = await magentoGet(`/products/${encodeURIComponent(p.sku)}`);
+            const linkIds = parentFull?.extension_attributes?.configurable_product_links || [];
+            if (linkIds.length > 0) {
+              const qp = {
+                'searchCriteria[pageSize]': Math.max(linkIds.length, 20),
+                'searchCriteria[filter_groups][0][filters][0][field]': 'entity_id',
+                'searchCriteria[filter_groups][0][filters][0][value]': linkIds.join(','),
+                'searchCriteria[filter_groups][0][filters][0][condition_type]': 'in',
+                'fields': 'items[id,sku,name,price,status,visibility]'
+              };
+              const byIds = await magentoGet('/products', qp);
+              children = byIds?.items || [];
+            }
+          } catch (fe) { /* fallback failed — leave children empty, parent will drop */ }
+        }
         if (!Array.isArray(children) || children.length === 0) return;
         // Prices
         const prices = children.map(c => parseFloat(c.price || 0)).filter(v => v > 0);
@@ -2352,7 +2374,25 @@ async function enrichConfigurables(products, forceAll = true) {
   const queue = targets.slice(0, CAP);
   const enrichOne = async p => {
     try {
-      const children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
+      // v6.7.3: /children endpoint unreliable — fallback to configurable_product_links
+      let children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
+      if (!Array.isArray(children) || children.length === 0) {
+        try {
+          const parentFull = await magentoGet(`/products/${encodeURIComponent(p.sku)}`);
+          const linkIds = parentFull?.extension_attributes?.configurable_product_links || [];
+          if (linkIds.length > 0) {
+            const qp = {
+              'searchCriteria[pageSize]': Math.max(linkIds.length, 20),
+              'searchCriteria[filter_groups][0][filters][0][field]': 'entity_id',
+              'searchCriteria[filter_groups][0][filters][0][value]': linkIds.join(','),
+              'searchCriteria[filter_groups][0][filters][0][condition_type]': 'in',
+              'fields': 'items[id,sku,name,price,status,visibility]'
+            };
+            const byIds = await magentoGet('/products', qp);
+            children = byIds?.items || [];
+          }
+        } catch (fe) { /* leave empty */ }
+      }
       if (!Array.isArray(children) || children.length === 0) return;
       // Price: lowest non-zero across children; keep a max for ranges.
       const prices = children.map(c => parseFloat(c.price || 0)).filter(v => v > 0);
