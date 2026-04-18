@@ -2881,6 +2881,57 @@ async function smartProductSearch({ query, sport = 'tennis', min_price = null, m
   if (qLower.includes('padel')) sport = 'padel';
   else if (qLower.includes('pickleball') || qLower.includes('pickle')) sport = 'pickleball';
   const startMs = Date.now();
+
+  // v6.7.14: SPECIFIC-NAME SHORT-CIRCUIT. If the query reads like an exact
+  // product name (brand + model + significant qualifiers), defer ENTIRELY to
+  // searchProducts and skip the category merge. Category browse is
+  // authoritative for category-style queries ("tennis shoes under 5000"), but
+  // for named lookups ("YONEX Poly Tour Fire 16L String Reel (200 m)") the
+  // category path will always pull high-qty alternatives that can out-rank
+  // the exact item. If searchProducts returns ANY item whose name contains
+  // every significant query token (≥0.8 coverage), we treat that as a
+  // confident hit and return the search_products list directly.
+  const KNOWN_BRANDS = new Set([
+    'yonex','wilson','babolat','head','prince','asics','nike','adidas','puma',
+    'solinco','luxilon','tecnifibre','dunlop','gamma','volkl','kirschbaum',
+    'signum','pacific','tourna','bauer','mantis','xiom','butterfly','victor',
+    'li-ning','prokennex','paddletek','selkirk','joola','engage','onix','gearbox',
+    'franklin','paddletek','bullpadel','head-padel','adidas-padel','nox','ram'
+  ]);
+  const nameTokens = String(query || '').toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t.length >= 2 && !SEARCH_STOPWORDS.has(t));
+  const hasBrandHint = nameTokens.some(t => KNOWN_BRANDS.has(t));
+  const looksLikeSpecificName = hasBrandHint && nameTokens.length >= 3;
+  if (looksLikeSpecificName) {
+    try {
+      const sr = await searchProducts(query, Math.max(page_size, 10), { min_price, max_price, sport });
+      const items = sr.products || [];
+      const score = (p) => {
+        const nm = String(p.name || '').toLowerCase();
+        if (!nameTokens.length) return 0;
+        let h = 0; for (const t of nameTokens) if (nm.includes(t)) h++;
+        return h / nameTokens.length;
+      };
+      const hasStrongMatch = items.some(p => score(p) >= 0.8);
+      if (hasStrongMatch) {
+        console.log(`[smart-search] specific-name short-circuit for "${query}" → deferring to searchProducts (${items.length} hits)`);
+        return {
+          products: items.slice(0, Math.min(page_size, 20)),
+          total: items.length,
+          showing: Math.min(items.length, page_size, 20),
+          sources: [{ source: 'keyword_search_exact', count: items.length }],
+          resolved_categories: [],
+          took_ms: Date.now() - startMs,
+          message: items.length === 0 ? `No products found matching "${query}".` : null
+        };
+      }
+    } catch (e) {
+      console.log(`[smart-search] specific-name short-circuit failed, falling back to full smart-search:`, e.message);
+    }
+  }
+
   const resolved = resolveCategoriesFromQuery(query, 3);
   console.log(`[smart-search] query="${query}" resolved ${resolved.length} categories in ${Date.now() - startMs}ms:`, resolved.map(c => `${c.id}:${c.name}`).join(', '));
 
@@ -2944,11 +2995,30 @@ async function smartProductSearch({ query, sport = 'tennis', min_price = null, m
     if (inSport.length > 0) scoped = inSport;
   }
 
-  // v6.4.2: In-stock first (hard priority), then qty desc, then price asc.
-  // The previous sort was qty-only, which pushed OOS=0 products to the end
-  // only incidentally and did nothing to guarantee in-stock-first ordering
-  // across a mixed pool. isProductAvailable handles configurables correctly.
+  // v6.7.14: TOKEN-COVERAGE BOOST FIRST — same logic as searchProducts.
+  // When the query names a specific product ("YONEX Poly Tour Fire 16L String
+  // Reel (200 m)"), we were merging category results + keyword search results
+  // then sorting by stock/qty/price only — the exact-match product got buried
+  // under whichever category item had the biggest qty. Now we primary-sort by
+  // per-item token-coverage (fraction of query tokens that appear in the
+  // product name). This makes smart-search honor specific-name queries the
+  // same way searchProducts does. For generic category queries ("show me
+  // tennis shoes"), most products get roughly equal token coverage and the
+  // tiebreakers (stock > qty > price) still produce the old behavior.
+  const smartTokens = String(query || '').toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t.length >= 2 && !SEARCH_STOPWORDS.has(t));
+  const smartTokenScore = (p) => {
+    const name = String(p.name || '').toLowerCase();
+    if (!smartTokens.length) return 0;
+    let hits = 0;
+    for (const t of smartTokens) if (name.includes(t)) hits++;
+    return hits / smartTokens.length;  // 0..1
+  };
   scoped.sort((a, b) => {
+    const sa = smartTokenScore(a), sb = smartTokenScore(b);
+    if (sa !== sb) return sb - sa;
     const aIn = ((a.qty || 0) >= 1 && isProductAvailable(a)) ? 1 : 0;
     const bIn = ((b.qty || 0) >= 1 && isProductAvailable(b)) ? 1 : 0;
     if (aIn !== bIn) return bIn - aIn;
@@ -3856,7 +3926,7 @@ app.get('/api/health', async (req, res) => {
   res.json({
     status: 'running',
     version: pkg.version,
-    code_build: '6.7.13',
+    code_build: '6.7.14',
     last_refresh: lastCatalogRefresh,
     categories_loaded: CATEGORY_MAP.length,
     category_index_keys: Object.keys(CATEGORY_INDEX).length,
