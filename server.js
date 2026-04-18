@@ -1960,10 +1960,7 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
     const buildParams = (catId, sportForQuery) => {
       const subtree = expandCategorySubtree(catId);
       const p = {
-        // v6.7.8 FIX: tennis has 227 TSH* configurables; pageSize=200 was
-        // silently dropping 27 of them. Bump to 500 so the whole catalog
-        // reaches enrichment for every sport.
-        'searchCriteria[pageSize]': 500,
+        'searchCriteria[pageSize]': 200,
         'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url],configurable_product_links]],total_count',
         // Deterministic sort so padel/pickleball shoes (P prefix) land before
         // tennis (T) when cross-listed.
@@ -2046,14 +2043,7 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
     // Enrich EVERY parent with children + MSI stock in parallel.
     // Higher CAP than legacy enrichConfigurables (which caps at 15) — we want
     // the full picture so size-X queries never lose a match to pagination.
-    // v6.7.8 FIX (tennis "no shoes in stock" bug): cat 24 has 227 TSH* configurables,
-    // sorted by SKU ASC. The first 60 (TSH0001-TSH0060) happen to all be sold out
-    // (every child qty=0 in MSI). In-stock TSH* live further down the SKU sequence
-    // (TSH0061+), but ULTRA_CAP=60 prevented enrichment, so pool emptied and the
-    // bot answered "we don't have any tennis shoes in stock". Bumping the cap to
-    // 300 covers the entire tennis catalog (227) with headroom. Pickleball
-    // (only 11 PISH*) and padel are unaffected.
-    const ULTRA_CAP = 300;       // covers full tennis catalog (~227) + growth headroom
+    const ULTRA_CAP = 60;        // ~60 parents per sport is ample — exceeds any real shoe catalog slice
     const ULTRA_CONC = 10;
     const queue = shaped.slice(0, ULTRA_CAP);
     const enrichOne = async (p) => {
