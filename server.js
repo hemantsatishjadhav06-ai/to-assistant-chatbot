@@ -1945,12 +1945,25 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
       ? Object.keys(SHOE_CATEGORIES)     // tennis, pickleball, padel
       : (SHOE_CATEGORIES[sportKey] ? [sportKey] : Object.keys(SHOE_CATEGORIES));
 
-    // Build /products params for one shoe category id (expands subtree)
-    const buildParams = (catId) => {
+    // Build /products params for one shoe category id (expands subtree).
+    // v6.7.2: adds `sku LIKE <prefix>%` filter per sport AND sortOrders by
+    // SKU ASC. Root cause of the v6.7.1 padel/pickleball empty-result bug:
+    // cat 274 (padel shoes) has ~1839 products cross-listed, 254 of which
+    // are configurables with status=1/visibility=4 — but Magento default
+    // sort is entity_id ASC, so TSH* (tennis, older) fill the first 200
+    // slots and the 54 real PDSH* shoes (positions 201-254) never fetch.
+    // Sport-lock post-filter then drops all 200 TSH* → total=0. Filtering
+    // by SKU prefix server-side is the only robust fix.
+    const SPORT_SKU_PREFIX = { tennis: 'TSH', pickleball: 'PISH', padel: 'PDSH' };
+    const buildParams = (catId, sportForQuery) => {
       const subtree = expandCategorySubtree(catId);
       const p = {
         'searchCriteria[pageSize]': 200,
-        'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]]],total_count'
+        'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]]],total_count',
+        // Deterministic sort so padel/pickleball shoes (P prefix) land before
+        // tennis (T) when cross-listed.
+        'searchCriteria[sortOrders][0][field]': 'sku',
+        'searchCriteria[sortOrders][0][direction]': 'ASC'
       };
       p['searchCriteria[filter_groups][0][filters][0][field]'] = 'category_id';
       p['searchCriteria[filter_groups][0][filters][0][value]'] = subtree.join(',');
@@ -1959,17 +1972,28 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
       p['searchCriteria[filter_groups][1][filters][0][value]'] = 1;
       p['searchCriteria[filter_groups][2][filters][0][field]'] = 'visibility';
       p['searchCriteria[filter_groups][2][filters][0][value]'] = 4;
+      // v6.7.2: server-side SKU prefix filter. Only applied when we know the
+      // sport (sport !== 'all') because 'all' must return cross-sport results.
+      let nextGroup = 3;
+      const prefix = SPORT_SKU_PREFIX[sportForQuery];
+      if (prefix) {
+        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][field]`] = 'sku';
+        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][value]`] = `${prefix}%`;
+        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][condition_type]`] = 'like';
+        nextGroup++;
+      }
       if (brandId) {
-        p['searchCriteria[filter_groups][3][filters][0][field]'] = 'brands';
-        p['searchCriteria[filter_groups][3][filters][0][value]'] = brandId;
+        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][field]`] = 'brands';
+        p[`searchCriteria[filter_groups][${nextGroup}][filters][0][value]`] = brandId;
       }
       return p;
     };
 
-    // Fetch each shoe category in parallel, dedupe by SKU, tag sport
+    // Fetch each shoe category in parallel, dedupe by SKU, tag sport.
+    // v6.7.2: pass the per-iteration sport so buildParams can filter by SKU prefix.
     const _sportForSku = {};
     const catResults = await Promise.allSettled(
-      sportsToScan.map(s => magentoGet('/products', buildParams(SHOE_CATEGORIES[s])).then(r => ({ s, r })))
+      sportsToScan.map(s => magentoGet('/products', buildParams(SHOE_CATEGORIES[s], s)).then(r => ({ s, r })))
     );
     const parents = [];
     const seen = new Set();
