@@ -190,6 +190,67 @@ const CATEGORY_TO_SPORT = {
   434: 'tennis', 437: 'tennis', 449: 'tennis', 451: 'tennis', 454: 'tennis'
 };
 
+// v6.4.5: CATEGORY_SUBTREE — parent → [self, ...all known descendants].
+// Derived from the authoritative Magento category tree (admin-confirmed).
+// Used by getProductsByCategory so a query for "pickleball shoes" (253) traverses
+// brand subcats 267/268/269/270/271/365/404 too. Without this, cross-listed tennis
+// shoes dominate category 253 and in-stock PISH* items get paginated out.
+const CATEGORY_SUBTREE = {
+  // ===== PICKLEBALL (root 243) =====
+  243: [243,
+        250, 257, 258, 259, 260, 261, 262, 302, 307, 332, 333, 345, 351, 354, 355, 356, 357,
+        394, 400, 407, 426, 438, 439, 441, 445, 447,
+        252, 263, 264, 265, 266, 311, 312, 350, 388, 403, 440, 448,
+        253, 267, 268, 269, 270, 271, 365, 404,
+        254, 308, 309, 310, 334, 340, 352, 405,
+        255, 256, 328, 353, 389, 393, 399, 406, 429, 431, 435, 446, 455],
+  250: [250, 257, 258, 259, 260, 261, 262, 302, 307, 332, 333, 345, 351, 354, 355, 356, 357,
+        394, 400, 407, 426, 438, 439, 441, 445, 447],           // Pickleball Paddles
+  252: [252, 263, 264, 265, 266, 311, 312, 350, 388, 403, 440, 448], // Pickleball Balls
+  253: [253, 267, 268, 269, 270, 271, 365, 404],                    // Pickleball Shoes (ASICS/Nike/Joma/Yonex/Babolat/Adidas/Hundred)
+  254: [254, 308, 309, 310, 334, 340, 352, 405],                    // Pickleball Bags
+  255: [255],                                                        // Pickleball Net & Post
+  256: [256, 328, 353, 389, 393, 399, 406, 429, 431, 435, 446, 455], // Pickleball Accessories
+
+  // ===== PADEL (root 245) =====
+  245: [245,
+        272, 277, 278, 279, 280, 303, 329, 331, 339, 427,
+        273, 281, 282, 283, 284, 313, 360, 428, 453,
+        274, 287, 288, 289, 290, 291, 314, 367, 424,
+        275, 304, 305, 306, 318, 330, 369,
+        276, 363, 375, 432, 436, 452],
+  272: [272, 277, 278, 279, 280, 303, 329, 331, 339, 427],           // Padel Rackets
+  273: [273, 281, 282, 283, 284, 313, 360, 428, 453],                // Padel Balls
+  274: [274, 287, 288, 289, 290, 291, 314, 367, 424],                // Padel Shoes
+  275: [275, 304, 305, 306, 318, 330, 369],                          // Padel Bags
+  276: [276, 363, 375, 432, 436, 452],                               // Padel Accessories
+
+  // ===== TENNIS (root) =====
+  24: [24, 28, 103, 104, 105, 106, 107, 237, 322],                   // Tennis Shoes
+  29: [29, 30, 33, 122, 123, 124, 125, 126, 127, 177, 182, 185, 186, 187, 188, 189, 190,
+       191, 192, 193, 194, 195, 196, 223, 224, 235, 236, 321, 341, 342, 343, 344, 371, 372, 373, 374], // Tennis Strings
+  31: [31, 32, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 361], // Tennis Balls
+  36: [36, 108, 109, 110, 111, 112, 113, 114, 368],                  // Tennis Clothing
+  37: [37, 128, 129, 130, 131, 132, 133, 134, 135, 136, 183, 390],   // Tennis Accessories
+  115: [115, 116, 117, 118, 119, 120, 121, 233],                     // Tennis Bags (incl. Asics 233 per admin tree)
+  25: [25, 26, 34, 35, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
+       61, 62, 63, 64, 65, 66, 67, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82,
+       83, 84, 85, 86, 87, 88, 89, 166, 173, 178, 179, 180, 181, 210, 211, 212, 213, 214,
+       239, 248, 319, 324, 325, 326, 327, 336, 337, 346, 347, 348, 358, 359, 364, 370, 376,
+       422, 423],                                                    // Tennis Racquets
+  90: [90],                                                          // Tennis Used Racquets
+  38: [38, 39, 40, 41, 42, 43, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 209,
+       315, 316, 320, 442, 443, 444]                                 // Tennis Stringing Machines/Supplies
+};
+
+// Helper: return the category IDs to search for a given parent.
+// Defaults to [categoryId] when parent is not in the subtree map.
+function expandCategorySubtree(categoryId) {
+  const id = parseInt(categoryId);
+  if (!Number.isFinite(id)) return [];
+  return CATEGORY_SUBTREE[id] || [id];
+}
+
 function detectSportFromProduct(item, fallbackSport = 'tennis') {
   // v6.1.5: PRIORITY 1 — Detect sport from product NAME / SKU / url_key.
   // This is the MOST reliable signal because Magento REST API does NOT return
@@ -1308,17 +1369,30 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     // This ensures padel category 273 always gets padeloutlet.in URLs, etc.
     const detectedSport = CATEGORY_TO_SPORT[parseInt(categoryId)] || sport || 'tennis';
     sport = detectedSport;
-    const fetchSize = Math.max(pageSize * 3, 30);
+
+    // v6.4.5: Expand parent category to full subtree (self + all brand subcategories).
+    // A query for "pickleball shoes" (253) now searches 253,267,268,269,270,271,365,404.
+    // Magento filter uses condition_type=in with a comma-joined list.
+    const subtree = expandCategorySubtree(categoryId);
+    const catValue = subtree.join(',');
+
+    // v6.4.5: Bump fetchSize to 200. Category 253 alone has 1700+ cross-listings
+    // (tennis shoes assigned to pickleball category). With the previous fetchSize=30,
+    // in-stock PISH* SKUs were paginated out. 200 gives enough headroom to reach
+    // the real in-stock sport-specific products before the sport post-filter drops
+    // cross-listed wrong-sport items.
+    const fetchSize = Math.max(pageSize * 20, 200);
     const params = {
       'searchCriteria[filter_groups][0][filters][0][field]': 'category_id',
-      'searchCriteria[filter_groups][0][filters][0][value]': categoryId,
+      'searchCriteria[filter_groups][0][filters][0][value]': catValue,
+      'searchCriteria[filter_groups][0][filters][0][condition_type]': subtree.length > 1 ? 'in' : 'eq',
       'searchCriteria[filter_groups][1][filters][0][field]': 'status',
       'searchCriteria[filter_groups][1][filters][0][value]': 1,
       'searchCriteria[filter_groups][2][filters][0][field]': 'visibility',
       'searchCriteria[filter_groups][2][filters][0][value]': 4,
-      // NOTE: removed quantity_and_stock_status pre-filter ÃÂ¢ÃÂÃÂ unreliable on MSI for configurables.
+      // NOTE: removed quantity_and_stock_status pre-filter — unreliable on MSI for configurables.
       // Real stock verification happens downstream via fetchStockMap + enrichConfigurables.
-      'searchCriteria[pageSize]': Math.min(fetchSize, 100),
+      'searchCriteria[pageSize]': Math.min(fetchSize, 300),
       'searchCriteria[sortOrders][0][field]': 'created_at',
       'searchCriteria[sortOrders][0][direction]': 'DESC',
       // Request url_rewrites so buildProductUrl gets the canonical storefront URL.
@@ -1328,9 +1402,19 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     if (!result.items || result.items.length === 0) {
       return { products: [], total: 0, message: "No products found in this category." };
     }
-    const skus = result.items.map(i => i.sku);
+
+    // v6.4.5: SPORT LOCK post-filter. Category 253 (pickleball shoes) is polluted
+    // with tennis shoes assigned to pickleball website. Drop any item whose own
+    // SKU/name/url_key says it's a different sport than the category root.
+    const rawItems = result.items.filter(it => {
+      const productSport = detectSportFromProduct(it, sport);
+      return productSport === sport;
+    });
+    const effectiveItems = rawItems.length > 0 ? rawItems : result.items;
+
+    const skus = effectiveItems.map(i => i.sku);
     const stockMap = await fetchStockMap(skus);
-    const shaped = result.items.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
+    const shaped = effectiveItems.map(item => shapeProduct(item, stockMap[item.sku] || 0, sport));
     await enrichConfigurables(shaped);  // forceAll=true: verify child stock for ALL configurables
 
     // v6.4.0: tag availability, keep OOS as fallback tier.
@@ -1348,16 +1432,17 @@ async function getProductsByCategory(categoryId, pageSize = 10, { min_price = nu
     let message = null;
     if (final.length === 0 && beforeCustomer > 0) {
       const bits = [];
-      if (max_price) bits.push(`under \u20B9${Number(max_price).toLocaleString('en-IN')}`);
-      if (min_price) bits.push(`over \u20B9${Number(min_price).toLocaleString('en-IN')}`);
+      if (max_price) bits.push(`under ₹${Number(max_price).toLocaleString('en-IN')}`);
+      if (min_price) bits.push(`over ₹${Number(min_price).toLocaleString('en-IN')}`);
       message = `No products in this category match the price filter${bits.length ? ` (${bits.join(', ')})` : ''}.`;
     }
-    return { products: final, total: result.total_count, showing: final.length, filtered_out, message };
+    return { products: final, total: result.total_count, showing: final.length, filtered_out, message, _subtree: subtree, _sport_locked: rawItems.length };
   } catch (error) {
     console.error('getProductsByCategory error:', error.response?.status, error.message);
     return { error: true, message: "Unable to fetch products at this time. Please try again." };
   }
 }
+
 
 // Build Magento searchCriteria that ORs LIKE across name + sku + url_key.
 // Magento treats filters inside the SAME filter_group as OR.
