@@ -1959,7 +1959,7 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
       const subtree = expandCategorySubtree(catId);
       const p = {
         'searchCriteria[pageSize]': 200,
-        'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url]]],total_count',
+        'fields': 'items[id,sku,name,type_id,price,status,visibility,custom_attributes,extension_attributes[stock_item,url_rewrites[url],configurable_product_links]],total_count',
         // Deterministic sort so padel/pickleball shoes (P prefix) land before
         // tennis (T) when cross-listed.
         'searchCriteria[sortOrders][0][field]': 'sku',
@@ -2052,10 +2052,14 @@ async function getShoesUltra({ sport = 'all', brand = null, size = null, min_pri
         // empty AND parent is configurable, fallback to fetching products by entity_id.
         let children = await magentoGet(`/configurable-products/${encodeURIComponent(p.sku)}/children`);
         if (!Array.isArray(children) || children.length === 0) {
-          // Fallback path: read configurable_product_links from parent product
+          // v6.7.4: try ext_links already on p (from inlined primary query)
+          // before round-tripping /products/{sku}. Saves 1 API call per parent.
           try {
-            const parentFull = await magentoGet(`/products/${encodeURIComponent(p.sku)}`);
-            const linkIds = parentFull?.extension_attributes?.configurable_product_links || [];
+            let linkIds = p?.extension_attributes?.configurable_product_links || [];
+            if (!linkIds || linkIds.length === 0) {
+              const parentFull = await magentoGet(`/products/${encodeURIComponent(p.sku)}`);
+              linkIds = parentFull?.extension_attributes?.configurable_product_links || [];
+            }
             if (linkIds.length > 0) {
               const qp = {
                 'searchCriteria[pageSize]': Math.max(linkIds.length, 20),
