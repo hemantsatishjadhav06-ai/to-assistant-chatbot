@@ -180,6 +180,9 @@ function extractIntentHint(text) {
   // Order detection: keyword+ID together, OR bare 9-digit number (very likely an order ID in a shopping chatbot)
   if (/\b(order|tracking|track|dispatch|shipment|delivery|status)\b/i.test(s) && extractOrderId(s)) return 'order';
   if (/^\s*\d{7,12}\s*$/.test(s)) return 'order';  // bare numeric ID => assume order
+  // v6.8.4: Live-demo / test / showcase intent. MUST be checked before the policy regex,
+  // because both may contain words like 'visit', 'schedule', or brand/product names.
+  if (/\b(live\s?demo|schedule\s?(a\s?)?demo|book\s?(a\s?)?demo|demo\s?(it|the|this|now|session|first)|product\s?(demo|showcase|trial)|try\s?(it|before|in\s?person|out|first)|test\s?(it|drive|before|the\s?product|first)|try\s?and\s?buy|see\s?(the\s?product|it\s?in\s?person|before\s?buying|it\s?live)|showcase|show\s?me\s?the\s?(physical|actual)\s?product|physical\s?(demo|trial|test|showcase)|hands?\s?on|touch\s?and\s?feel|come\s?(and\s?)?see|feel\s?(it|the\s?product)|before\s?buy(ing)?|in\s?person|try\s?(the|this|a|an|my)\s+\w+|test\s?(the|this|a|an|my)\s+\w+)\b/i.test(s)) return 'demo';
   if (/\b(return|refund|shipping|warranty|policy|contact|store hours|phone|address|location|situated|situtated|timing|timings|walk[- ]?in|visit|open|opening|close|closing|hours|directions|maps|where are you|where is (your|the) (store|shop|warehouse|office))|payment|emi|cod|coupon|welcome10|padel15|pickle15|balls3|ball5\b/i.test(s)) return 'policy';
   // "sell my old racquet", "trade-in my aero", "buyback", "exchange my racquet" -> policy (TO evaluates case-by-case)
   if (/\b(sell (my|the|an?|old|used) |trade[- ]?in|buy[- ]?back|exchange (my|the|an?|old|used)|give away my|part exchange)\b/i.test(s)) return 'policy';

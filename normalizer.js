@@ -64,6 +64,7 @@ INTERPRETATION RULES (CRITICAL):
 17. COUPON: "any offers", "discount code", "coupon", "sale", "koi offer hai", "promo code" -> intent: "coupon".
 18. STRINGING: "stringing service", "restring", "string my racquet", "string tension", "gut string" -> intent: "stringing".
 19. TECH: "what weight is X", "head size of Y", "string pattern", "swingweight", "beam width", technical specs question -> intent: "tech".
+20. DEMO / TEST / PRODUCT SHOWCASE: "can I try this before buying", "live demo", "book a demo", "schedule a demo", "product showcase", "test before buy", "can I see the product in person", "try and buy", "hands on", "touch and feel the product", "test drive the racquet", "come see the product", "physical demo", "physical trial", "showcase" -> intent: "demo". Carry brand/model/sport if the customer names a specific product.
 
 EXAMPLES:
 
@@ -117,6 +118,15 @@ Output: {"intent":"policy","sport":null,"brand":null,"model":null,"skill_level":
 
 Input: "what is the head size and weight of wilson clash 100"
 Output: {"intent":"tech","sport":"tennis","brand":"Wilson","model":"Clash 100","skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"Wilson Clash 100 head size and weight specs","confidence":0.97}
+
+Input: "can i try the babolat pure aero before buying"
+Output: {"intent":"demo","sport":"tennis","brand":"Babolat","model":"Pure Aero","skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"live demo for Babolat Pure Aero","confidence":0.95}
+
+Input: "i want to test the pickleball paddle in person"
+Output: {"intent":"demo","sport":"pickleball","brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"live demo for pickleball paddle","confidence":0.93}
+
+Input: "book me a live demo for head champion tennis balls"
+Output: {"intent":"demo","sport":"tennis","brand":"Head","model":"Champion","skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"live demo for Head Champion tennis balls","confidence":0.96}
 
 Now normalize the customer's message. Respond with ONLY the JSON, no other text.`;
 
