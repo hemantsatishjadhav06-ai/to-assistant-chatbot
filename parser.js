@@ -180,7 +180,7 @@ function extractIntentHint(text) {
   // Order detection: keyword+ID together, OR bare 9-digit number (very likely an order ID in a shopping chatbot)
   if (/\b(order|tracking|track|dispatch|shipment|delivery|status)\b/i.test(s) && extractOrderId(s)) return 'order';
   if (/^\s*\d{7,12}\s*$/.test(s)) return 'order';  // bare numeric ID => assume order
-  if (/\b(return|refund|shipping|warranty|policy|contact|store hours|phone|address|payment|emi|cod|coupon|welcome10)\b/i.test(s)) return 'policy';
+  if (/\b(return|refund|shipping|warranty|policy|contact|store hours|phone|address|location|situated|situtated|timing|timings|walk[- ]?in|visit|open|opening|close|closing|hours|directions|maps|where are you|where is (your|the) (store|shop|warehouse|office))|payment|emi|cod|coupon|welcome10|padel15|pickle15|balls3to\b/i.test(s)) return 'policy';
   // "sell my old racquet", "trade-in my aero", "buyback", "exchange my racquet" -> policy (TO evaluates case-by-case)
   if (/\b(sell (my|the|an?|old|used) |trade[- ]?in|buy[- ]?back|exchange (my|the|an?|old|used)|give away my|part exchange)\b/i.test(s)) return 'policy';
   if (/\b(brands?|which brands?|what brands?)\b/i.test(s) && !/racquet|shoe|ball/i.test(s)) return 'brand';

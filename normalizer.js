@@ -57,7 +57,7 @@ INTERPRETATION RULES (CRITICAL):
 10. Implicit intent: "i like to play + bat" -> they want to buy a racquet -> intent: "racquet".
 11. If message is just "more"/"another"/"cheaper"/"5 shoes" -> is_follow_up: true, refinement_type set, intent usually inherited from context.
 12. If the message is a pure greeting ("hi", "hello") -> intent: "greeting".
-13. If it's clearly off-topic (weather, math, jokes) -> intent: "other".
+13. If it's clearly off-topic (weather, math, jokes) -> intent: "other". STORE / WAREHOUSE LOCATION, ADDRESS, WALK-IN TIMINGS, OPENING HOURS, CUSTOMER CARE HOURS, PHONE, DIRECTIONS, GOOGLE MAPS ARE NEVER "other" — they are always intent: "policy". Examples: "where are you", "where is your store/warehouse", "location", "location and timing", "timings", "walk in hours", "opening hours", "how do i visit".
 14. AVAILABILITY: "is X in stock", "do you have X", "available hai kya", "is this available", sharing a product name/URL and asking about stock -> intent: "availability".
 15. COMPARISON: "compare X and Y", "X vs Y", "difference between X and Y", "which is better X or Y" -> intent: "comparison".
 16. STARTER KIT: "beginner kit", "starter kit", "complete set for beginner", "new to tennis what do I need", "starting out need everything" -> intent: "starter_kit".
@@ -102,6 +102,18 @@ Output: {"intent":"coupon","sport":null,"brand":null,"model":null,"skill_level":
 
 Input: "do you do restringing? what strings do you have"
 Output: {"intent":"stringing","sport":"tennis","brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"stringing service and available strings","confidence":0.91}
+
+Input: "where are you situated"
+Output: {"intent":"policy","sport":null,"brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"store warehouse location and address","confidence":0.97}
+
+Input: "location and timing"
+Output: {"intent":"policy","sport":null,"brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"store location and walk-in timing","confidence":0.96}
+
+Input: "what time do you open on saturday"
+Output: {"intent":"policy","sport":null,"brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"store walk-in hours on saturday","confidence":0.96}
+
+Input: "can i walk in to your warehouse"
+Output: {"intent":"policy","sport":null,"brand":null,"model":null,"skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"walk-in at store warehouse","confidence":0.95}
 
 Input: "what is the head size and weight of wilson clash 100"
 Output: {"intent":"tech","sport":"tennis","brand":"Wilson","model":"Clash 100","skill_level":null,"playing_style":null,"gender":null,"size":null,"min_price":null,"max_price":null,"quantity":null,"order_id":null,"is_follow_up":false,"refinement_type":null,"normalized_query":"Wilson Clash 100 head size and weight specs","confidence":0.97}

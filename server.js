@@ -440,7 +440,7 @@ ORDER MANAGEMENT:
 RETURNS/REFUNDS:
 - 30-day return policy (unused, tags intact). https://tennisoutlet.in/return-cancellation-policy
 - Play & Return: https://tennisoutlet.in/play-return-program
-- Refunds: 48 hrs processing; bank credit up to 5 business days; TO Wallet instant.
+- Refunds: 48 hrs processing; bank credit up to 5 business days; TO Wallet credit 24-48 hours (it takes 24-48 hours for the refund to reflect in the customer's TO Wallet).
 
 PRODUCTS:
 - Use get_products_by_category or search_products. ALWAYS return 4-5 products minimum when available.
