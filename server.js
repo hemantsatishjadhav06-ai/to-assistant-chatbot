@@ -442,6 +442,7 @@ ORDER MANAGEMENT:
 - NEVER reveal amount, address, product items, or payment info.
 - When AWB is available, ALWAYS share Blue Dart tracking link: https://bluedart.com/?{AWB}
 - Orders dispatched within 8 hours. Delivery 2-5 business days (Blue Dart).
+- EXACT DELIVERY DATE (v6.8.5): When a customer asks for the "exact delivery date", "delivery date for my location", "when will it reach me", "estimated delivery to <my pincode/city>", or any delivery-ETA question tied to a location (and they have NOT yet placed an order), DO NOT quote customer-care hours or the 2-5 business day window as the primary answer. Reply with: "To check the exact delivery date for your location, please enter your pincode on the product page of the item you wish to purchase. This will provide you with an updated delivery estimate tailored to your specific area." You may add a single closing line offering to help them find the product page if they haven't chosen one yet. Only fall back to customer care (+91 9502517700) if the customer explicitly says the pincode tool isn't working for them.
 
 RETURNS/REFUNDS:
 - 30-day return policy (unused, tags intact). https://tennisoutlet.in/return-cancellation-policy
@@ -534,11 +535,19 @@ CATEGORY-LOCKED SUBSTITUTION RULE (v6.8.3 — CRITICAL, APPLIES WHENEVER AN EXAC
 - When presenting the fallback, open with: "The [exact product name] is currently out of stock. Here are in-stock [category, same sport] alternatives:" — then list 3–5 products with clickable links. Offer to notify the customer when the requested item is restocked.
 - If after the category+sport fallback you still have ZERO in-stock results, say so honestly ("We're currently sold out of [category] across this sport — I can notify you the moment we restock") rather than suggesting a different category.
 
-LIVE DEMO / PRODUCT SHOWCASE (v6.8.4):
+LIVE DEMO / PRODUCT SHOWCASE (v6.8.5):
 - We offer a Live Demo program on almost every primary product (tennis racquets, padel rackets, pickleball paddles / "pickle bats", tennis balls, pickleballs, padel balls, ball machines, shoes, and most on-court gear). Accessories (wristbands, overgrips, dampeners, bag tags) are excluded.
 - The booking lives ON EACH PRODUCT PAGE. Flow: customer opens the product page → clicks the "Live Demo" button on that page → picks a day and time → our team calls to confirm and schedule the physical showcase.
 - When a customer asks about demos, testing, trials, "try before buying", "hands on", "touch and feel", "come see", "physical showcase", or "live demo", route the query to the demo specialist. Give them the specific product page URL (the product_url from a tool call) and tell them to click "Live Demo" on that page. NEVER invent a separate demo-scheduling URL — the booking UI is only on product pages.
 - NEVER recommend an accessory for a demo. NEVER cross sports (tennis demo → tennis products only, etc.).
+- DEMO CATEGORY DISCIPLINE (v6.8.5 — CRITICAL): The products you show for a demo/test/trial request MUST be in the SAME CATEGORY the customer asked about. If the customer asks to "test a racquet / racket / paddle", call get_racquets_with_specs — NEVER return racquet BAGS, covers, or grips. If they ask to test shoes, call get_shoes_ultra. If they ask to test a ball machine, call get_ball_machines. A racquet-bag response to a "test a racquet" question is a BROKEN answer.
+- PLAY & RETURN (v6.8.5 — MANDATORY alongside Live Demo): Whenever the customer asks about testing, trialing, or trying a product before buying, ALWAYS also surface the Play & Return program (https://tennisoutlet.in/play-return-program) as a complementary option. Both should appear in the same reply: Live Demo for a hands-on in-person showcase, Play & Return as a low-risk buy-and-try path from home.
+
+TENNIXX AI BALL MACHINE (v6.8.5 — STOCK + DEMO RULE, OVERRIDES GENERIC OOS COPY):
+- The Tennixx AI Ball Machine line (any variant — Tennixx AI, Tennixx Basic AI, Tennixx Smart, etc.) is a priority SKU for us. Apply these rules whenever the customer mentions Tennixx, "tennixx", "tenniix", an AI ball machine, or asks about ball-machine trials/demos specifically.
+- CURRENT STOCK STATUS: Even if get_ball_machines reports the Tennixx AI Ball Machine as out of stock, DO NOT end the conversation there. Instead tell the customer plainly: "New stock of the Tennixx AI Ball Machine is arriving by 20-May and will be dispatched the same day it lands." Offer to take their details so we can notify them the moment it's back.
+- WAREHOUSE TRIAL / DEMO: We DO have a Tennixx Basic AI Ball Machine available at our warehouse for trial / demo. When the customer asks whether they can trial, test, demo, or try the Tennixx AI Ball Machine, confirm: "Yes — we have a Tennixx Basic AI Ball Machine at our warehouse in Hyderabad that you can come in and trial / demo in person." Share the warehouse address (Survey No. 47/A, near Sreenidhi International School, Aziznagar, Hyderabad 500075), walk-in hours (Mon-Sat, 10:30 AM – 06:00 PM), and the Google Maps link (https://share.google/ZSYwohkaU2ounLXBZ). Also mention the Live Demo booking on the product page and the Play & Return program (https://tennisoutlet.in/play-return-program) as additional options.
+- Never say "we don't have it available for trial" for the Tennixx AI Ball Machine — the correct answer is always: in-stock units are arriving 20-May (dispatched same day), and the Tennixx Basic AI Ball Machine is available for a hands-on warehouse trial today.
 
 SMART GUIDELINES:
 - Beginner racquet -> get_racquets_with_specs({skill_level:"beginner"}) + add beginner advice (lighter, larger head size, forgiving).
@@ -2822,12 +2831,15 @@ async function getBallMachines({ page_size = 10, min_price = null, max_price = n
   const available = mergeAvailability(stripInternals(sortedPool), page_size);
   let message = null;
   if (available.length === 0 && seen.size > 0) {
-    message = `Found ${seen.size} ball-machine products, but none match the requested price filter.`;
+    message = `Found ${seen.size} ball-machine products, but none match the requested price filter. TENNIXX RULE: Tell the customer new Tennixx AI Ball Machine stock is arriving by 20-May and will be dispatched same day, and that a Tennixx Basic AI Ball Machine is available at our Hyderabad warehouse for trial/demo today.`;
   } else if (seen.size === 0) {
-    message = `No ball machines found in the catalog right now. You can also browse https://tennisoutlet.in/other/ball-machine.html directly.`;
+    message = `No ball machines matched in the catalog right now. TENNIXX RULE (v6.8.5): Do NOT tell the customer we don't have ball machines. Instead reply: "New Tennixx AI Ball Machine stock is arriving by 20-May and will be dispatched the same day it lands. We also have a Tennixx Basic AI Ball Machine at our Hyderabad warehouse (Survey No. 47/A, Aziznagar, 500075, Mon-Sat 10:30 AM–6:00 PM) available for a hands-on trial/demo today." Offer to collect their contact for a restock alert. Also share the Live Demo booking (on the product page) and Play & Return (https://tennisoutlet.in/play-return-program) as additional options. Browse: https://tennisoutlet.in/other/ball-machine.html`;
   }
+  // Tennixx trial/demo override: always surface the warehouse-trial + 20-May restock signal to the LLM.
+  const tennixx_trial_note = `TENNIXX TRIAL/DEMO: A Tennixx Basic AI Ball Machine is available at our Hyderabad warehouse (Survey No. 47/A, near Sreenidhi International School, Aziznagar, Hyderabad 500075, Mon-Sat 10:30 AM–6:00 PM, https://share.google/ZSYwohkaU2ounLXBZ) for an in-person trial/demo. New stock of the Tennixx AI Ball Machine is arriving by 20-May and will be dispatched the same day. Always mention both whenever the customer asks about a ball-machine trial, demo, or Tennixx availability.`;
   return {
     products: available,
+    tennixx_trial_note,
     total: seen.size,
     showing: available.length,
     category_ids_used: BALL_MACHINE_CATEGORY_IDS,
