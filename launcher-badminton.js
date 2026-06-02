@@ -162,7 +162,7 @@
   })();
 
   var css = ''
-    + '.to-launcher{position:fixed!important;right:14px!important;bottom:12px!important;z-index:2147483600!important;width:118px!important;height:112px!important;background:transparent!important;border:0!important;padding:0!important;margin:0!important;cursor:pointer;-webkit-tap-highlight-color:transparent;overflow:visible;pointer-events:none}'
+    + '.to-launcher{position:fixed!important;right:14px!important;bottom:12px!important;z-index:2147483600!important;width:84px!important;height:80px!important;background:transparent!important;border:0!important;padding:0!important;margin:0!important;cursor:pointer;-webkit-tap-highlight-color:transparent;overflow:visible;pointer-events:none}'
     + '.to-launcher .to-stk{width:100%;height:100%;display:block;overflow:visible;transition:transform .18s ease;opacity:0;transform:scale(.7);transform-origin:80% 80%}'
     + '.to-launcher.is-ready .to-stk{opacity:1;transform:scale(1)}'
     + '.to-launcher .to-hit{pointer-events:auto;cursor:pointer}'
@@ -180,10 +180,10 @@
     + '.to-launcher.is-open .to-ico,.to-launcher.is-open .to-wah,.to-launcher.is-open .to-hand{display:none}'
     + '.to-launcher.is-open .to-xmark{display:block}'
     + '.to-launcher.is-open .to-stk{transform:scale(1)!important}'
-    + '.to-panel{position:fixed!important;right:18px;bottom:118px;z-index:2147483600;width:400px;max-width:calc(100vw - 32px);height:610px;max-height:calc(100vh - 146px);background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.28);opacity:0;transform:translateY(12px) scale(.98);pointer-events:none;transition:opacity .2s ease,transform .2s ease}'
+    + '.to-panel{position:fixed!important;right:18px;bottom:90px;z-index:2147483600;width:400px;max-width:calc(100vw - 32px);height:610px;max-height:calc(100vh - 146px);background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.28);opacity:0;transform:translateY(12px) scale(.98);pointer-events:none;transition:opacity .2s ease,transform .2s ease}'
     + '.to-panel.is-open{opacity:1;transform:none;pointer-events:auto}'
     + '.to-panel iframe{width:100%;height:100%;border:0;display:block}'
-    + '@media (max-width:480px){.to-launcher{right:8px!important;bottom:8px!important;width:104px!important;height:99px!important}.to-panel{right:8px;left:8px;bottom:108px;width:auto;height:calc(100vh - 124px)}}';
+    + '@media (max-width:480px){.to-launcher{right:8px!important;bottom:8px!important;width:76px!important;height:72px!important}.to-panel{right:8px;left:8px;bottom:80px;width:auto;height:calc(100vh - 124px)}}';
   var st = document.createElement('style'); st.setAttribute('data-to-assistant', '1'); st.appendChild(document.createTextNode(css));
   (document.head || document.documentElement).appendChild(st);
 
